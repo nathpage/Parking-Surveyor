@@ -153,6 +153,25 @@ Repository: https://github.com/nathpage/Parking-Surveyor
 License version: 1.0 (January 2025)
 
 ====================================================================
+🗺️ MAP DATA ATTRIBUTION
+====================================================================
+
+This project uses map data and tile imagery from **OpenStreetMap (OSM)**.
+
+© OpenStreetMap contributors  
+Data licensed under the [Open Database License (ODbL) v1.0](https://opendatacommons.org/licenses/odbl/1.0/).  
+Map tiles provided by [OpenStreetMap.org](https://www.openstreetmap.org/).  
+You are free to copy, distribute, transmit, and adapt OSM data, provided you credit 
+“OpenStreetMap and its contributors” and share any derivative data under the same license.
+
+Parking Surveyor complies with these terms by:
+ - Displaying attribution within the map interface.
+ - Using OSM tile servers for non-commercial, low-traffic, academic use.
+ - Not redistributing or monetizing OSM map data.
+
+For more details, visit: https://www.openstreetmap.org/copyright
+
+====================================================================
 🙏 ACKNOWLEDGEMENTS
 ====================================================================
 
