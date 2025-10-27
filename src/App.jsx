@@ -4,127 +4,9 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "@geoman-io/leaflet-geoman-free";
 import "@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 import { getPathLength } from "geolib";
-
-import {
-  Document,
-  Packer,
-  Paragraph,
-  TextRun,
-  HeadingLevel,
-  Table,
-  TableRow,
-  TableCell,
-  WidthType,
-  AlignmentType,
-  ImageRun,
-} from "docx";
-import { saveAs } from "file-saver";
-
-// ===================== i18n: translations =====================
-const translations = {
-  en: {
-    appTitle: "Parking Survey",
-    subtitle: "Draw segments along streets and tag them. Use the polygon/rectangle tool to draw the study area.",
-    legend: "Legend",
-    category: {
-      free: "Free (anyone)",
-      residents: "Residents only",
-      limited: "Limited time",
-    },
-    ui: { showPanel: "Show panel", hidePanel: "Hide panel" },
-    approxSpaces: "Approx. spaces by category",
-    measuredLength: "Measured length by category",
-    exportGeoJSON: "Export GeoJSON",
-    import: "Import",
-    exportPDF: "Export PDF",
-    exportWord: "Export Word",
-    clearAll: "🗑️ Clear all data",
-    clearStudy: "Clear study area",
-    autosaveInfo: "Data is autosaved to your browser. Export to share or back up.",
-    drawHint:
-      "Draw a line along a street ➜ Save details ➜ Repeat. Use Export to share the survey as GeoJSON.",
-    pdf: {
-      title: "Jena Parking Survey",
-      subtitle: "Grete-Unrein-Str. / Forstweg / Lutherstraße and vicinity",
-      generated: "Generated",
-      studyArea: "Study area included",
-      summary: "Summary",
-      segments: "Segments",
-      totalSpacesFree: "Total spaces (Free)",
-      totalSpacesResidents: "Total spaces (Residents)",
-      totalSpacesLimited: "Total spaces (Limited)",
-      metric: "Metric",
-      value: "Value",
-      field_category: "Category",
-      field_spaces: "Spaces",
-      field_rules: "Rules / Hours",
-      field_notes: "Notes",
-      field_timelimit: "Time limit (mins)",
-      footerPreparedBy: "Survey prepared by:",
-    },
-  },
-  de: {
-    appTitle: "Parkraumerhebung",
-    subtitle:
-      "Zeichnen Sie Abschnitte entlang der Straßen und markieren Sie diese. Verwenden Sie das Polygon- oder Rechteck-Werkzeug, um das Untersuchungsgebiet festzulegen.",
-    legend: "Legende",
-    category: {
-      free: "Frei (öffentlich)",
-      residents: "Nur Anwohner",
-      limited: "Begrenzt (zeitlich)",
-    },
-    ui: { showPanel: "Panel anzeigen", hidePanel: "Panel verbergen" },
-    approxSpaces: "Geschätzte Stellplätze nach Kategorie",
-    measuredLength: "Gemessene Länge nach Kategorie",
-    exportGeoJSON: "GeoJSON exportieren",
-    import: "Importieren",
-    exportPDF: "PDF exportieren",
-    exportWord: "Word exportieren",
-    clearAll: "🗑️ Alle Daten löschen",
-    clearStudy: "Untersuchungsgebiet löschen",
-    autosaveInfo:
-      "Daten werden automatisch im Browser gespeichert. Exportieren Sie zum Teilen oder Sichern.",
-    drawHint:
-      "Zeichnen Sie Linien entlang der Straßen ➜ Details speichern ➜ Wiederholen. Nutzen Sie den Export zum Teilen der Erhebung.",
-    pdf: {
-      title: "Parkraumerhebung Jena",
-      subtitle: "Grete-Unrein-Straße / Forstweg / Lutherstraße und Umgebung",
-      generated: "Erstellt am",
-      studyArea: "Untersuchungsgebiet enthalten",
-      summary: "Zusammenfassung",
-      segments: "Straßenabschnitte",
-      totalSpacesFree: "Gesamtzahl Stellplätze (Frei)",
-      totalSpacesResidents: "Gesamtzahl Stellplätze (Anwohner)",
-      totalSpacesLimited: "Gesamtzahl Stellplätze (Begrenzt)",
-      metric: "Merkmal",
-      value: "Wert",
-      field_category: "Kategorie",
-      field_spaces: "Stellplätze",
-      field_rules: "Regeln / Zeiten",
-      field_notes: "Notizen",
-      field_timelimit: "Zeitbegrenzung (Minuten)",
-      footerPreparedBy: "Erhebung erstellt von:",
-    },
-  },
-};
-
-// helper: dataURL -> Uint8Array
-async function dataUrlToUint8Array(dataUrl) {
-  try {
-    const res = await fetch(dataUrl);
-    const buf = await res.arrayBuffer();
-    return new Uint8Array(buf);
-  } catch {
-    const [, base64] = dataUrl.split(",");
-    const bin = atob(base64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes;
-  }
-}
+import { exportPdf, exportDocx } from "./exports/docs";
+import { translations } from "./i18n";
 
 function PanelToggle({ open, setOpen, label }) {
   return (
@@ -153,381 +35,141 @@ function PanelToggle({ open, setOpen, label }) {
   );
 }
 
-export async function exportDocx({ features, boundary, lang = "en" }) {
-  const t = translations[lang].pdf;
-
-  const styles = {
-    h1: (txt) =>
-      new Paragraph({
-        text: txt,
-        heading: HeadingLevel.HEADING_1,
-        spacing: { before: 200, after: 120 },
-      }),
-    h2: (txt) =>
-      new Paragraph({
-        text: txt,
-        heading: HeadingLevel.HEADING_2,
-        spacing: { before: 160, after: 80 },
-      }),
-    title: new Paragraph({
-      heading: HeadingLevel.TITLE,
-      children: [new TextRun(t.title)],
-      spacing: { after: 300 },
-      alignment: AlignmentType.CENTER,
-    }),
-    subtitle: (txt) =>
-      new Paragraph({
-        children: [new TextRun({ text: txt, italics: true })],
-        spacing: { after: 200 },
-        alignment: AlignmentType.CENTER,
-      }),
-    small: (txt) =>
-      new Paragraph({
-        children: [new TextRun({ text: txt, size: 18 })],
-      }),
-    caption: (txt) =>
-      new Paragraph({
-        children: [new TextRun({ text: txt, italics: true, size: 18, color: "555555" })],
-        spacing: { after: 120 },
-      }),
-    spacer: new Paragraph({ children: [new TextRun("")], spacing: { after: 120 } }),
-  };
-
-  const children = [];
-  children.push(
-    styles.title,
-    styles.subtitle(t.subtitle),
-    styles.small(`${t.generated}: ${new Date().toLocaleString()}`)
-  );
-  if (boundary?.length >= 3) children.push(styles.small(t.studyArea));
-
-  // summary
-  const totals = { free: 0, residents: 0, limited: 0 };
-  for (const f of features) {
-    const c = f.properties?.category;
-    const n = Number(f.properties?.spaces) || 0;
-    if (c && totals[c] != null) totals[c] += n;
-  }
-
-  children.push(
-    styles.h1(t.summary),
-    new Table({
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      rows: [
-        new TableRow({
-          tableHeader: true,
-          children: [
-            new TableCell({ children: [new Paragraph(t.metric)] }),
-            new TableCell({ children: [new Paragraph(t.value)] }),
-          ],
-        }),
-        ...[
-          [t.segments, String(features.length)],
-          [t.totalSpacesFree, String(totals.free)],
-          [t.totalSpacesResidents, String(totals.residents)],
-          [t.totalSpacesLimited, String(totals.limited)],
-        ].map(
-          ([k, v]) =>
-            new TableRow({
-              children: [new TableCell({ children: [new Paragraph(k)] }), new TableCell({ children: [new Paragraph(v)] })],
-            })
-        ),
-      ],
-    }),
-    styles.spacer
-  );
-
-  // segments
-  const items = [...features].sort((a, b) =>
-    (a.properties?.street ?? "").localeCompare(b.properties?.street ?? "")
-  );
-
-  for (const f of items) {
-    const p = f.properties || {};
-    const imgs = Array.isArray(p.images) ? p.images : [];
-    const first = imgs[0];
-
-    children.push(styles.h2(p.street || "Unnamed street"));
-
-    const rows = [
-      [t.field_category, p.category || ""],
-      [t.field_spaces, String(p.spaces ?? "")],
-      ...(p.category === "limited" ? [[t.field_timelimit, String(p.limitMins ?? "")]] : []),
-      [t.field_rules, p.rules || ""],
-      [t.field_notes, p.notes || ""],
-    ];
-
-    const metaTable = new Table({
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      rows: rows.map(
-        ([k, v]) =>
-          new TableRow({
-            children: [
-              new TableCell({
-                width: { size: 30, type: WidthType.PERCENTAGE },
-                children: [new Paragraph(k)],
-              }),
-              new TableCell({
-                width: { size: 70, type: WidthType.PERCENTAGE },
-                children: [new Paragraph(v)],
-              }),
-            ],
-          })
-      ),
-    });
-
-    if (first) {
-      const imgData = await dataUrlToUint8Array(first.dataUrl);
-      const twoCol = new Table({
-        width: { size: 100, type: WidthType.PERCENTAGE },
-        rows: [
-          new TableRow({
-            children: [
-              new TableCell({ width: { size: 60, type: WidthType.PERCENTAGE }, children: [metaTable] }),
-              new TableCell({
-                width: { size: 40, type: WidthType.PERCENTAGE },
-                children: [
-                  new Paragraph({
-                    children: [new ImageRun({ data: imgData, transformation: { width: 320, height: 220 } })],
-                  }),
-                ],
-              }),
-            ],
-          }),
-        ],
-      });
-      children.push(twoCol);
-      if (first.caption) children.push(styles.caption(first.caption));
-    } else {
-      children.push(metaTable);
-    }
-
-    if (imgs.length > 1) {
-      const rest = imgs.slice(1);
-      for (let i = 0; i < rest.length; i += 2) {
-        const pair = rest.slice(i, i + 2);
-        const cells = await Promise.all(
-          pair.map(async (img) => {
-            try {
-              const data = await dataUrlToUint8Array(img.dataUrl);
-              return new TableCell({
-                width: { size: 50, type: WidthType.PERCENTAGE },
-                children: [
-                  new Paragraph({ children: [new ImageRun({ data, transformation: { width: 260, height: 180 } })] }),
-                  img.caption
-                    ? new Paragraph({ children: [new TextRun({ text: img.caption, italics: true, size: 18 })] })
-                    : new Paragraph(""),
-                ],
-              });
-            } catch {
-              return new TableCell({ children: [new Paragraph("Image could not be embedded")] });
-            }
-          })
-        );
-        if (cells.length === 1) cells.push(new TableCell({ children: [new Paragraph("")] }));
-        children.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [new TableRow({ children: cells })] }));
-      }
-    }
-
-    children.push(styles.spacer);
-  }
-
-  const doc = new Document({
-    sections: [{ properties: { page: { margin: { top: 720, right: 720, bottom: 720, left: 720 } } }, children }],
-  });
-  const blob = await Packer.toBlob(doc);
-  saveAs(blob, lang === "de" ? "parkraumerhebung-jena.docx" : "jena-parking-survey.docx");
-}
-
-async function exportPdf({ features, boundary, lang = "en" }) {
-  const t = translations[lang].pdf;
-  const doc = new jsPDF({ unit: "mm", format: "a4" });
-  const pageW = doc.internal.pageSize.getWidth();
-  const pageH = doc.internal.pageSize.getHeight();
-
-  const nowLabel = `${t.generated}: ${new Date().toLocaleString()}`;
-
-  // Cover
-  doc.setFontSize(20);
-  doc.text(t.title, pageW / 2, 30, { align: "center" });
-  doc.setFontSize(12);
-  doc.text(t.subtitle, pageW / 2, 40, { align: "center" });
-  doc.text(nowLabel, pageW / 2, 48, { align: "center" });
-  if (boundary?.length >= 3) doc.text(t.studyArea, pageW / 2, 56, { align: "center" });
-  doc.addPage();
-
-  // Summary
-  const totals = { free: 0, residents: 0, limited: 0 };
-  features.forEach((f) => {
-    const c = f.properties?.category;
-    const n = Number(f.properties?.spaces) || 0;
-    if (c && totals[c] != null) totals[c] += n;
-  });
-
-  doc.setFontSize(16);
-  doc.text(t.summary, 14, 18);
-  autoTable(doc, {
-    startY: 24,
-    head: [[t.metric, t.value]],
-    body: [
-      [t.segments, String(features.length)],
-      [t.totalSpacesFree, String(totals.free)],
-      [t.totalSpacesResidents, String(totals.residents)],
-      [t.totalSpacesLimited, String(totals.limited)],
-    ],
-    theme: "grid",
-    styles: { fontSize: 10, cellPadding: 2 },
-    headStyles: { fillColor: [17, 24, 39] },
-  });
-
-  let y = (doc.lastAutoTable?.finalY || 24) + 10;
-  if (y > pageH - 40) {
-    doc.addPage();
-    y = 18;
-  }
-
-  // Sort by street
-  const items = [...features].sort((a, b) =>
-    (a.properties?.street ?? "").localeCompare(b.properties?.street ?? "")
-  );
-
-  for (const f of items) {
-    const p = f.properties || {};
-    doc.setFontSize(14);
-    doc.text(p.street || "Unnamed street", 14, y);
-    y += 6;
-
-    const imgs = Array.isArray(p.images) ? p.images : [];
-
-    const imgBoxW = 60; // image column width
-    const textBoxW = pageW - imgBoxW - 28;
-    const tableX = 14;
-
-    autoTable(doc, {
-      startY: y,
-      head: [[t.metric, t.value]],
-      body: [
-        [t.field_category, p.category || ""],
-        [t.field_spaces, String(p.spaces ?? "")],
-        ...(p.category === "limited" ? [[t.field_timelimit, String(p.limitMins ?? "")]] : []),
-        [t.field_rules, p.rules || ""],
-        [t.field_notes, p.notes || ""],
-      ],
-      theme: "plain",
-      styles: { fontSize: 10, cellPadding: 1.5 },
-      tableWidth: textBoxW,
-      margin: { left: tableX, right: imgBoxW + 14 },
-      columnStyles: { 0: { cellWidth: 45 }, 1: { cellWidth: textBoxW - 45 } },
-    });
-
-    const tableBottomY = doc.lastAutoTable.finalY;
-    const topY = y;
-    y = tableBottomY + 4;
-
-    if (imgs.length > 0) {
-      const img = imgs[0];
-      const imgX = pageW - imgBoxW - 14;
-      const imgY = topY;
-      const maxH = Math.min(60, tableBottomY - topY);
-      try {
-        doc.addImage(img.dataUrl, "JPEG", imgX, imgY, imgBoxW, maxH, undefined, "FAST");
-      } catch {
-        try {
-          doc.addImage(img.dataUrl, "PNG", imgX, imgY, imgBoxW, maxH, undefined, "FAST");
-        } catch {}
-      }
-      if (img.caption) {
-        doc.setFontSize(9);
-        doc.text(String(img.caption), imgX, imgY + maxH + 4, { maxWidth: imgBoxW });
-      }
-    }
-
-    if (imgs.length > 1) {
-      const subImgs = imgs.slice(1);
-      let subY = y;
-      const maxW = (pageW - 28 - 6) / 2;
-      const maxH = 55;
-      for (let i = 0; i < subImgs.length; i++) {
-        if (subY + maxH + 14 > pageH) {
-          doc.addPage();
-          subY = 18;
-        }
-        const col = i % 2;
-        const x = 14 + col * (maxW + 6);
-        const { dataUrl, caption = "" } = subImgs[i];
-        try {
-          doc.addImage(dataUrl, "JPEG", x, subY, maxW, maxH, undefined, "FAST");
-        } catch {
-          try {
-            doc.addImage(dataUrl, "PNG", x, subY, maxW, maxH, undefined, "FAST");
-          } catch {}
-        }
-        doc.text(String(caption), x, subY + maxH + 5, { maxWidth: maxW });
-        if (col === 1) subY += maxH + 14;
-      }
-      if (subImgs.length % 2 === 1) subY += maxH + 14;
-      y = subY + 6;
-    }
-
-    if (y > pageH - 40) {
-      doc.addPage();
-      y = 18;
-    }
-  }
-
-  // footer page numbers & signature line
-  const pages = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= pages; i++) {
-    doc.setPage(i);
-    doc.setFontSize(9);
-    doc.text(`${i}/${pages}`, pageW - 18, pageH - 8);
-    if (i === pages) {
-      doc.text(`${t.footerPreparedBy} ____________________`, 14, pageH - 8);
-    }
-  }
-
-  doc.save(lang === "de" ? "parkraumerhebung-jena.pdf" : "jena-parking-survey.pdf");
-}
-
 const INITIAL_CENTER = [50.9279, 11.5865];
 const INITIAL_ZOOM = 16;
 
 // Category styles
 const CATEGORY_STYLES = {
-  free: { color: "#22c55e", weight: 6 },
-  residents: { color: "#ef4444", weight: 6 },
-  limited: { color: "#f59e0b", weight: 6 },
+  free: { color: "#22c55e", weight: 8 },
+  residents: { color: "#ef4444", weight: 8 },
+  limited: { color: "#f59e0b", weight: 8 },
 };
 
-function Legend({ t }) {
+function LegendControl({ t }) {
+  const [open, setOpen] = React.useState(false);
+
+  // shared styles
+  const padLeft = 12;  // use a little extra space for thumb
+  const padBottom = 12;
+
   return (
-    <div
-      style={{
-        position: "absolute",
-        bottom: 16,
-        left: 16,
-        background: "rgba(255,255,255,0.9)",
-        borderRadius: 12,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-        padding: 12,
-        fontSize: 14,
-        zIndex: 1000,
-      }}
+    <>
+      {/* Legend panel */}
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            left: padLeft,
+            bottom: 52 + padBottom, // leave space for the pill button
+            background: "rgba(255,255,255,0.95)",
+            borderRadius: 14,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.2)",
+            padding: "12px 14px",
+            fontSize: 14,
+            zIndex: 1100,
+            backdropFilter: "saturate(120%) blur(4px)",
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>{t.legend}</div>
+          <div><span style={{display:"inline-block",width:24,height:4,background:"#22c55e",borderRadius:2,marginRight:8}}/> {t.category.free}</div>
+          <div><span style={{display:"inline-block",width:24,height:4,background:"#ef4444",borderRadius:2,marginRight:8}}/> {t.category.residents}</div>
+          <div><span style={{display:"inline-block",width:24,height:4,background:"#f59e0b",borderRadius:2,marginRight:8}}/> {t.category.limited}</div>
+        </div>
+      )}
+
+      {/* Toggle button (NOT a Leaflet control) */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        aria-label={open ? "Hide legend" : "Show legend"}
+        style={{
+          position: "absolute",
+          left: padLeft,
+          bottom: padBottom,
+          zIndex: 1101,
+          border: "none",
+          outline: "none",
+          padding: "8px 12px",
+          borderRadius: 9999,
+          background: "#111827",
+          color: "#fff",
+          fontSize: 13,
+          fontWeight: 600,
+          boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
+          WebkitTapHighlightColor: "transparent", // iOS tap bubble off
+          WebkitAppearance: "none",
+          userSelect: "none",
+          cursor: "pointer",
+        }}
+      >
+        {open ? "✕" : "Legend"}
+      </button>
+    </>
+  );
+}
+
+// ——— Shared button styles / variants ———
+const BTN_BASE = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "100%",
+  height: 40,                 // fixed height for ALL buttons
+  padding: "0 14px",          // no vertical padding, keeps heights identical
+  borderRadius: 12,
+  fontWeight: 600,
+  fontSize: 16,
+  lineHeight: 1,              // normalize text metrics across elements
+  border: "1px solid transparent",
+  boxSizing: "border-box",    // consistent sizing model
+  cursor: "pointer",
+  userSelect: "none",
+  WebkitAppearance: "none",   // iOS normalize
+  appearance: "none",
+  outline: "none",
+};
+
+const BTN_VARIANTS = {
+  dark:   { background: "#111827", color: "#fff" },
+  brand:  { background: "#2563eb", color: "#fff" },
+  light:  { background: "#fff",    color: "#111827", border: "1px solid #e5e7eb" },
+  muted:  { background: "#e5e7eb", color: "#111827", border: "1px solid #e5e7eb" },
+  danger: { background: "#fee2e2", color: "#b91c1c", border: "1px solid #fecaca" },
+};
+
+function mergeStyles(...objs) {
+  return Object.assign({}, ...objs);
+}
+
+// Button component (for <button>)
+function Btn({ variant = "dark", full, style, ...props }) {
+  return (
+    <button
+      {...props}
+      style={mergeStyles(
+        BTN_BASE,
+        BTN_VARIANTS[variant],
+        full ? { gridColumn: "1 / -1" } : null,
+        style
+      )}
+    />
+  );
+}
+
+// Label-as-button (for file input)
+function LabelBtn({ variant = "muted", htmlFor, full, style, children }) {
+  return (
+    <label
+      htmlFor={htmlFor}
+      style={mergeStyles(
+        BTN_BASE,
+        BTN_VARIANTS[variant],
+        full ? { gridColumn: "1 / -1" } : null,
+        style
+      )}
     >
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>{t.legend}</div>
-      <div>
-        <span style={{ display: "inline-block", width: 24, height: 4, background: "#22c55e", borderRadius: 2, marginRight: 8 }} />
-        {t.category.free}
-      </div>
-      <div>
-        <span style={{ display: "inline-block", width: 24, height: 4, background: "#ef4444", borderRadius: 2, marginRight: 8 }} />
-        {t.category.residents}
-      </div>
-      <div>
-        <span style={{ display: "inline-block", width: 24, height: 4, background: "#f59e0b", borderRadius: 2, marginRight: 8 }} />
-        {t.category.limited}
-      </div>
-    </div>
+      {children}
+    </label>
   );
 }
 
@@ -644,90 +286,74 @@ function Controls({
         </div>
       </div>
 
-      {/* Export / Import */}
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button
-          onClick={onExport}
-          style={{ padding: "8px 12px", borderRadius: 12, background: "#111827", color: "#fff", border: "none" }}
-        >
+      {/* Actions grid */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 10,
+          marginTop: 12,
+        }}
+      >
+        <Btn onClick={onExport} variant="dark">
           {t.exportGeoJSON}
-        </button>
-        <label style={{ padding: "8px 12px", borderRadius: 12, background: "#e5e7eb", cursor: "pointer" }}>
+        </Btn>
+
+        {/* Hidden file input + label-as-button */}
+        <input
+          id="importFile"
+          type="file"
+          accept=".geojson,.json,application/geo+json,application/json"
+          style={{ display: "none" }}
+          onChange={onImport}
+        />
+        <LabelBtn
+          variant="muted"
+          htmlFor="importFile"
+        >
           {t.import}
-          <input
-            type="file"
-            accept=".geojson,.json,application/geo+json,application/json"
-            style={{ display: "none" }}
-            onChange={onImport}
-          />
-        </label>
+        </LabelBtn>
+
+        <Btn
+          onClick={() => exportPdf({ features, boundary, lang })}
+          variant="dark"
+        >
+          {t.exportPDF}
+        </Btn>
+
+        <Btn
+          onClick={() => exportDocx({ features, boundary, lang })}
+          variant="brand"
+        >
+          {t.exportWord}
+        </Btn>
+
+        {/* Full-width buttons below */}
+        <Btn onClick={() => setBoundary(null)} variant="light" full style={{ height: 40 }}>
+          {t.clearStudy}
+        </Btn>
+
+        <Btn
+          onClick={() => {
+            const confirmMsg =
+              t.confirmClearAll ??
+              (lang === "de"
+                ? "Alle gespeicherten Daten wirklich löschen?"
+                : "Really delete all saved data?");
+            if (window.confirm(confirmMsg)) {
+              localStorage.removeItem("jena-parking-features-v1");
+              setFeatures([]);
+              setBoundary(null);
+            }
+          }}
+          variant="danger"
+          full
+          style={{ gap: 8, height: 40 }}
+        >
+          <span role="img" aria-label={t.ariaTrash ?? "trash"}>🗑️</span>
+          {t.clearAll}
+        </Btn>
       </div>
-
-      <button
-        onClick={() => exportPdf({ features, boundary, lang })}
-        style={{
-          marginTop: 10,
-          padding: "8px 12px",
-          borderRadius: 12,
-          background: "#111827",
-          color: "#fff",
-          border: "none",
-        }}
-      >
-        {t.exportPDF}
-      </button>
-
-      <button
-        onClick={() => exportDocx({ features, boundary, lang })}
-        style={{
-          marginTop: 10,
-          padding: "8px 12px",
-          borderRadius: 12,
-          background: "#2563eb",
-          color: "#fff",
-          border: "none",
-        }}
-      >
-        {t.exportWord}
-      </button>
-
-      <button
-        onClick={() => setBoundary(null)}
-        style={{
-          marginTop: 10,
-          padding: "6px 10px",
-          borderRadius: 8,
-          border: "1px solid #e5e7eb",
-          background: "#fff",
-        }}
-      >
-        {t.clearStudy}
-      </button>
-
-      <button
-        onClick={() => {
-          if (
-            window.confirm(
-              lang === "de" ? "Alle gespeicherten Daten wirklich löschen?" : "Really delete all saved data?"
-            )
-          ) {
-            localStorage.removeItem("jena-parking-features-v1");
-            setFeatures([]);
-            setBoundary(null);
-          }
-        }}
-        style={{
-          marginTop: 8,
-          padding: "6px 10px",
-          borderRadius: 8,
-          border: "1px solid #e5e7eb",
-          background: "#fee2e2",
-          borderColor: "#fca5a5",
-          color: "#b91c1c",
-        }}
-      >
-        {t.clearAll}
-      </button>
 
       <div style={{ color: "#6b7280", fontSize: 12, marginTop: 8 }}>{t.autosaveInfo}</div>
     </div>
@@ -1138,10 +764,24 @@ function MetadataForm({ feature, onSave, onCancel, onDelete }) {
   );
 }
 
+function useIsTouch() {
+  const [isTouch, setIsTouch] = React.useState(false);
+  React.useEffect(() => {
+    const mql = window.matchMedia?.("(pointer: coarse)");
+    const update = () => setIsTouch(!!(mql?.matches || "ontouchstart" in window));
+    update();
+    mql?.addEventListener?.("change", update);
+    return () => mql?.removeEventListener?.("change", update);
+  }, []);
+  return isTouch;
+}
+
+
 // --- React-leaflet polyline wrapper that hooks Geoman for per-layer edit/remove ---
 function PolylineWithGeoman({ feature, style, onEdit, onDelete, onClick, children }) {
   const map = useMap();
   const ref = React.useRef(null);
+  const isTouch = useIsTouch();
 
   useEffect(() => {
     const layer = ref.current;
@@ -1149,9 +789,8 @@ function PolylineWithGeoman({ feature, style, onEdit, onDelete, onClick, childre
 
     layer._fid = feature.properties?._id;
 
-    try {
-      if (layer.pm) layer.pm.disable();
-    } catch {}
+    // keep edit OFF by default (no vertices shown)
+    try { if (layer.pm) layer.pm.disable(); } catch {}
 
     const handleEdit = () => {
       const geo = layer.toGeoJSON();
@@ -1179,30 +818,61 @@ function PolylineWithGeoman({ feature, style, onEdit, onDelete, onClick, childre
       layer.off("pm:edit", handleEdit);
       layer.off("pm:remove", handleRemove);
       map.off("pm:globaleditmodetoggled", onGlobalEditToggle);
-      try {
-        layer.pm && layer.pm.disable();
-      } catch {}
+      try { layer.pm && layer.pm.disable(); } catch {}
     };
   }, [map, feature, onEdit, onDelete]);
 
   const coords = feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
 
-  return (
-    <Polyline
-      ref={ref}
-      positions={coords}
-      pathOptions={style}
-      eventHandlers={{
-        mouseover: (e) => e.target.openPopup(),
-        mouseout: (e) => e.target.closePopup(),
+  // Desktop vs Mobile event handlers
+  const handlers = isTouch
+    ? {
+        // tap -> open popup (don’t open editor directly on touch)
         click: (e) => {
+          e.originalEvent?.preventDefault?.();
+          e.originalEvent?.stopPropagation?.();
+          e.target.openPopup();
+        },
+      }
+    : {
+        mouseover: (e) => e.target.openPopup(),  // hover show
+        mouseout: (e) => e.target.closePopup(),  // hover hide
+        click: (e) => {                           // click -> open editor
           e.target.closePopup();
           onClick?.();
         },
-      }}
-    >
-      <Popup closeButton={false} autoPan={false}>
-        {children}
+      };
+
+  // Inline edit button (only for touch)
+  const TouchPopupControls = isTouch ? (
+    <div style={{ marginTop: 8 }}>
+      <button
+        onClick={(ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();      // keep the popup from closing due to map click bubbling
+          onClick?.();               // open editor modal
+        }}
+        style={{
+          padding: "6px 10px",
+          borderRadius: 8,
+          border: "1px solid #e5e7eb",
+          background: "#111827",
+          color: "#fff",
+          fontSize: 12
+        }}
+      >
+        Edit segment
+      </button>
+    </div>
+  ) : null;
+
+  return (
+    <Polyline ref={ref} positions={coords} pathOptions={style} eventHandlers={handlers}>
+      <Popup closeButton autoPan>
+        <div style={{ fontSize: 14 }}>
+          {children}
+          {TouchPopupControls}
+        </div>
       </Popup>
     </Polyline>
   );
@@ -1216,12 +886,7 @@ export default function JenaParkingMap() {
   const [boundary, setBoundary] = useState(null);
   const [lang, setLang] = useState("en");
   const t = translations[lang];
-  const [panelOpen, setPanelOpen] = useState(true);
-
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 768px)");
-    if (mq.matches) setPanelOpen(false);
-  }, []);
+  const [panelOpen, setPanelOpen] = useState(false);
 
   useAutosave(features, setFeatures, boundary, setBoundary);
 
@@ -1369,6 +1034,8 @@ export default function JenaParkingMap() {
         center={INITIAL_CENTER}
         zoom={INITIAL_ZOOM}
         scrollWheelZoom
+        maxZoom={22}
+        zoomControl={true}
         style={{
           width: "100%",
           height: "100%",
@@ -1379,9 +1046,12 @@ export default function JenaParkingMap() {
         }}
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
+  	  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors'
+  	  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+  	  maxNativeZoom={19}   // tiles exist to z=19
+  	  maxZoom={22}         // allow zooming past 19 by scaling
+  	  keepBuffer={5}       // keep more tiles around to avoid flashes
+	/>
 
         {boundary && (
           <Polygon positions={boundary} pathOptions={{ color: "#111827", weight: 2, dashArray: "6 6", fillOpacity: 0.08 }} interactive={false} />
@@ -1458,7 +1128,7 @@ export default function JenaParkingMap() {
         <LocateControl />
       </MapContainer>
 
-      <Legend t={t} />
+   
 
       {editingFeature && (
         <MetadataForm
@@ -1468,6 +1138,8 @@ export default function JenaParkingMap() {
           onDelete={deleteFeatureById}
         />
       )}
+
+      <LegendControl t={t} />
 
       {/* Hint bar — localized */}
       <div
