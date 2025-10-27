@@ -10,7 +10,10 @@ import { translations } from "./i18n";
 
 function PanelToggle({ open, setOpen, label }) {
   return (
-    <div className="leaflet-top leaflet-right" style={{ right: 0, top: 10, zIndex: 1002 }}>
+    <div
+      className="leaflet-top leaflet-right"
+      style={{ right: 0, top: "calc(10px + env(safe-area-inset-top, 0px))", zIndex: 1002 }}
+    >
       <div className="leaflet-control leaflet-bar">
         <a
           href="#"
@@ -50,7 +53,8 @@ function LegendControl({ t }) {
 
   // shared styles
   const padLeft = 12;  // use a little extra space for thumb
-  const padBottom = 12;
+  // push above the iOS bottom bar
+  const padBottom = "calc(12px + env(safe-area-inset-bottom, 0px))";
 
   return (
     <>
@@ -60,7 +64,7 @@ function LegendControl({ t }) {
           style={{
             position: "absolute",
             left: padLeft,
-            bottom: 52 + padBottom, // leave space for the pill button
+            bottom: `calc(52px + ${padBottom})`, // leave space for the pill button
             background: "rgba(255,255,255,0.95)",
             borderRadius: 14,
             boxShadow: "0 6px 18px rgba(0,0,0,0.2)",
@@ -1008,7 +1012,7 @@ export default function JenaParkingMap() {
   };
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100vh", overflow: "hidden" }}>
+    <div style={{ position: "relative", width: "100%", height: "100dvh", overflow: "hidden" }}>
       {/* Language selector (top-left, above map) */}
       <div style={{ position: "absolute", top: 10, left: 44, zIndex: 1001 }}>
         <select
@@ -1145,7 +1149,7 @@ export default function JenaParkingMap() {
       <div
         style={{
           position: "absolute",
-          bottom: 16,
+          bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
           left: "50%",
           transform: "translateX(-50%)",
           background: "rgba(255,255,255,0.7)",
