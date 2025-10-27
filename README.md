@@ -1,4 +1,3 @@
-=================================
 🅿️ PARKING SURVEYOR
 =================================
 
@@ -9,13 +8,11 @@ Built with React, Leaflet, and Vite, Parking Surveyor allows users to
 draw street segments, define study areas, and generate exportable
 reports for research, planning, or analysis.
 
-=================================
 🌐 LIVE DEMO
 =================================
 
 https://nathpage.github.io/Parking-Surveyor/
 
-=================================
 🧭 OVERVIEW
 =================================
 
@@ -26,7 +23,6 @@ It provides an intuitive map interface for drawing, labeling, and
 categorizing parking zones, and exports complete datasets for further
 processing or reporting.
 
-=================================
 🗺️ FEATURES
 =================================
 
@@ -53,7 +49,6 @@ processing or reporting.
  - Runs on desktop, tablet, and smartphone
  - Collapsible legend and side panel for a clean mobile interface
 
-=================================
 🧰 TECHNOLOGY STACK
 =================================
 
@@ -63,7 +58,6 @@ Export:    jsPDF, docx, FileSaver
 Hosting:   GitHub Pages
 Styling:   Minimal inline design (CSS-in-JS)
 
-=================================
 💻 LOCAL SETUP
 =================================
 
@@ -87,7 +81,6 @@ Styling:   Minimal inline design (CSS-in-JS)
    npm run deploy
    → https://nathpage.github.io/Parking-Surveyor/
 
-=================================
 🧾 USAGE GUIDE
 =================================
 
@@ -102,7 +95,6 @@ Styling:   Minimal inline design (CSS-in-JS)
    - Word or PDF for documentation
 5. Autosave is enabled — use “Clear All Data” to reset.
 
-=================================
 💡 TIPS
 =================================
 
@@ -110,7 +102,6 @@ Styling:   Minimal inline design (CSS-in-JS)
  - You can import/export GeoJSON files between devices.
  - Zoom in for high-precision vertex placement.
 
-=================================
 🧑‍💻 DEVELOPER NOTES
 =================================
 
@@ -119,7 +110,6 @@ Styling:   Minimal inline design (CSS-in-JS)
  - Touch logic optimized for mobile (tap for popup, edit via popup).
  - Legend and control panel are hidden by default.
 
-=================================
 📜 LICENSE
 =================================
 
@@ -151,7 +141,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 Author Contact: nathan@thepagefamily.co.za
 Repository: https://github.com/nathpage/Parking-Surveyor
 
-=================================
 🗺️ MAP DATA ATTRIBUTION
 =================================
 
@@ -170,7 +159,6 @@ Parking Surveyor complies with these terms by:
 
 For more details, visit: https://www.openstreetmap.org/copyright
 
-=================================
 🙏 ACKNOWLEDGEMENTS
 =================================
 
