@@ -1,12 +1,12 @@
 {
-  "name": "jena-parking-map",
+  "name": "parking-surveyor",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "homepage": "https://nathpage.github.io/Parking-Surveyor/",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && cp dist/index.html dist/404.html",
     "lint": "eslint .",
     "preview": "vite preview",
     "predeploy": "vite build && cp dist/index.html dist/404.html",
@@ -14,11 +14,13 @@
   },
   "dependencies": {
     "@geoman-io/leaflet-geoman-free": "^2.18.3",
+    "@turf/turf": "^7.2.0",
     "docx": "^9.5.1",
     "file-saver": "^2.0.5",
     "jspdf": "^3.0.3",
     "jspdf-autotable": "^5.0.2",
     "leaflet": "^1.9.4",
+    "leaflet-geometryutil": "^0.10.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-leaflet": "^5.0.0"

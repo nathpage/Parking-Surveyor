@@ -7,6 +7,42 @@ import "@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css";
 import { getPathLength } from "geolib";
 import { exportPdf, exportDocx } from "./exports/docs";
 import { translations } from "./i18n";
+import * as turf from "@turf/turf";
+import "leaflet-geometryutil"; // adds L.GeometryUtil.* helpers
+
+// Shared Overpass helper (fetch OSM roads for bbox)
+async function fetchOSMRoadsForBBox(bboxArr) {
+  const [w, s, e, n] = bboxArr;
+  const query = `
+    [out:json][timeout:25];
+    (way["highway"]["highway"!~"footway|path|cycleway|steps|bridleway"](${s},${w},${n},${e}););
+    out geom;
+  `;
+  const endpoints = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter"
+  ];
+  let data = null, lastErr = null;
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: `data=${encodeURIComponent(query)}`
+      });
+      if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
+      data = await res.json(); break;
+    } catch (err) { lastErr = err; }
+  }
+  if (!data) throw lastErr || new Error("Overpass request failed");
+
+  const features = (data.elements || [])
+    .filter(el => el.type === "way" && Array.isArray(el.geometry))
+    .map(el => turf.lineString(el.geometry.map(g => [g.lon, g.lat]), { id: el.id }));
+  return turf.featureCollection(features);
+}
+
 
 function PanelToggle({ open, setOpen, label }) {
   return (
@@ -467,7 +503,7 @@ function LocateControl() {
                 e.preventDefault();
                 stopLocate();
               }}
-              style={{ display: "block", width: 30, height: 30, lineHeight: "30px", textAlign: "center" }}
+              style={{ display: "block", width: 30, height: 30, lineHeight: "30px", textAlign: "center", zIndex: 999 }}
             >
               ✖️
             </a>
@@ -478,11 +514,442 @@ function LocateControl() {
   );
 }
 
-// GeomanDraw: bridge from Geoman -> React state
-function GeomanDraw({ onCreated, onEdited, onDeleted }) {
+// Editable boundary layer component
+function EditableBoundary({ boundary, setBoundary }) {
+  const map = useMap();
+  const layerRef = React.useRef(null);
+
+  // create / update the leaflet polygon that Geoman can edit
+  React.useEffect(() => {
+    if (!boundary || boundary.length < 3) {
+      // remove old layer if boundary cleared
+      if (layerRef.current) {
+        try { map.removeLayer(layerRef.current); } catch {}
+        layerRef.current = null;
+      }
+      return;
+    }
+
+    if (!layerRef.current) {
+      const layer = L.polygon(boundary, {
+        color: "#111827",
+        weight: 2,
+        dashArray: "6 6",
+        fillOpacity: 0.08
+      });
+      layer.addTo(map);
+
+      // register the layer with Geoman so global "Edit layers" can edit it
+      if (layer.pm) {
+        try {
+          layer.pm.setOptions({ snappable: false, pmIgnore: false });
+        } catch {}
+      }
+      if (L.PM && L.PM.reInitLayer) {
+        try { L.PM.reInitLayer(layer); } catch {}
+      }
+
+            // helper: read current polygon and push into React state
+      const commitBoundary = () => {
+        try {
+          const rings = layer.getLatLngs();
+          const ring = (Array.isArray(rings) && Array.isArray(rings[0])) ? rings[0] : rings;
+          const next = ring.map(ll => [ll.lat, ll.lng]);
+          setBoundary(next);
+        } catch {}
+      };
+
+      // live update while dragging (optional—to keep state in sync)
+      const onEdit = () => {
+        commitBoundary();
+      };
+      layer.on("pm:edit", onEdit);
+
+      // per-layer finalize when Geoman considers the edit "applied"
+      const onUpdate = () => {
+        commitBoundary();
+        try { map.fire("ps:boundary-finalized"); } catch {}
+      };
+      layer.on("pm:update", onUpdate);
+
+      // global edit mode toggled off (another finalize path)
+      const onGlobalEditToggle = (e) => {
+        if (!e.enabled) {
+          commitBoundary();
+          try { map.fire("ps:boundary-finalized"); } catch {}
+        }
+      };
+      try { map.on("pm:globaleditmodetoggled", onGlobalEditToggle); } catch {}
+
+      // *** IMPORTANT: toolbar "Finish" click in global Edit Layers ***
+      // Geoman emits pm:actionclick for toolbar actions. We use this to
+      // finalize even when pm:update doesn't fire.
+      const onActionClick = (e) => {
+        // e.button is the tool group, e.text is the label ("Finish")
+        if (e?.button === "edit" && String(e?.text).toLowerCase() === "finish") {
+          // allow Geoman to write the latest vertices, then commit + finalize
+          setTimeout(() => {
+            commitBoundary();
+            try { map.fire("ps:boundary-finalized"); } catch {}
+          }, 0);
+        }
+      };
+      try { map.on("pm:actionclick", onActionClick); } catch {}
+
+      layerRef.current = layer;
+      return () => {
+        try { layer.off("pm:edit", onEdit); } catch {}
+        try { layer.off("pm:update", onUpdate); } catch {}
+        try { map.off("pm:globaleditmodetoggled", onGlobalEditToggle); } catch {}
+        try { map.off("pm:actionclick", onActionClick); } catch {}
+      };
+    } else {
+      // update geometry without recreating
+      try { layerRef.current.setLatLngs(boundary); } catch {}
+    }
+  }, [map, boundary, setBoundary]);
+
+  // cleanup on unmount
+  React.useEffect(() => {
+    return () => {
+      if (layerRef.current) {
+        try { map.removeLayer(layerRef.current); } catch {}
+        layerRef.current = null;
+      }
+    };
+  }, [map]);
+
+  return null;
+}
+
+// Persistent, visible snap guides for "Snap: Auto"
+// - Fetches OSM roads for the current (padded) bounds when active
+// - Draws visible offset guides for both sides so users can see where snapping will happen
+function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary }) {
+  const map = useMap();
+  const guidesGroupRef = useRef(null);
+  const roadsFcRef = useRef(null);
+  const lastBBoxRef = useRef(null);
+  const fetchingRef = useRef(false);
+
+  // --- helper: remove all guides (unchanged) ---
+  const removeAllGuides = React.useCallback(() => {
+    if (guidesGroupRef.current) {
+      try { map.removeLayer(guidesGroupRef.current); } catch {}
+      guidesGroupRef.current = null;
+    }
+    map.eachLayer((lyr) => {
+      try { if (lyr && lyr._isSnapGuide) map.removeLayer(lyr); } catch {}
+    });
+  }, [map]);
+
+  // --- NEW helper: clip a LineString to a Polygon and return only inside segments ---
+  const clipLineToPolygon = React.useCallback((line, polygon) => {
+    try {
+      if (!line || !polygon) return [];
+      // Split the line by the polygon border
+      const border = turf.polygonToLine(polygon);
+      const split = turf.lineSplit(line, border);
+
+      // If nothing was split, check if the line is wholly inside
+      const collect = (ls) => {
+        // use midpoint test
+        const lenKm = turf.length(ls, { units: "kilometers" });
+        const mid = turf.along(ls, Math.max(0, lenKm / 2), { units: "kilometers" });
+        return turf.booleanPointInPolygon(mid, polygon);
+      };
+
+      if (!split || !split.features?.length) {
+        return collect(line) ? [line] : [];
+      }
+
+      // Keep only the parts whose midpoint lies inside the polygon
+      return split.features.filter((seg) => collect(seg));
+    } catch {
+      return [];
+    }
+  }, []);
+
+  // --- REPLACE your existing rebuildGuides with this version ---
+  const rebuildGuides = React.useCallback(() => {
+    // clear previous
+    if (guidesGroupRef.current) {
+      try { map.removeLayer(guidesGroupRef.current); } catch {}
+      guidesGroupRef.current = null;
+    }
+    if (!roadsFcRef.current || !roadsFcRef.current.features?.length) return;
+
+    // Build turf polygon from boundary (lng,lat order; closed ring)
+    if (!boundary || boundary.length < 3) return;
+    const ringLngLat = boundary.map(([lat, lng]) => [lng, lat]);
+    const poly = turf.polygon([[...ringLngLat, ringLngLat[0]]]);
+
+    const group = L.featureGroup();
+
+    roadsFcRef.current.features.forEach((road) => {
+      try {
+        const left  = turf.lineOffset(road,  Math.abs(offsetMeters), { units: "meters" });
+        const right = turf.lineOffset(road, -Math.abs(offsetMeters), { units: "meters" });
+
+        // clip both sides to the study polygon
+        const clippedLeft  = clipLineToPolygon(left,  poly);
+        const clippedRight = clipLineToPolygon(right, poly);
+
+        const addSegs = (segments, isLeft) => {
+          segments.forEach((seg) => {
+            const latlngs = seg.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+
+            // Visible dashed guide
+            const show = L.polyline(latlngs, {
+              color: isLeft ? "#2563eb" : "#10b981",
+              weight: 3,
+              opacity: 0.7,
+              dashArray: "4 4",
+              interactive: false,
+              pmIgnore: true,
+            });
+            show._isSnapGuide = true;
+            group.addLayer(show);
+
+            // Invisible thick hitbox for snapping
+            const hit = L.polyline(latlngs, {
+              color: "#000",
+              opacity: 0,
+              weight: 16,
+              interactive: true,
+              pmIgnore: false,
+            });
+            hit._isSnapGuide = true;
+            group.addLayer(hit);
+
+            if (hit.pm) {
+              try { hit.pm.setOptions({ pmIgnore: false, snapIgnore: false }); } catch {}
+            }
+            if (L.PM && L.PM.reInitLayer) {
+              try { L.PM.reInitLayer(hit); } catch {}
+            }
+          });
+        };
+
+        addSegs(clippedLeft,  true);
+        addSegs(clippedRight, false);
+      } catch {}
+    });
+
+    group.addTo(map);
+    guidesGroupRef.current = group;
+  }, [map, offsetMeters, boundary, clipLineToPolygon]);
+
+  // expose roads getter (unchanged)
+  useEffect(() => {
+    if (typeof setExternalRoadsGetter === "function") {
+      setExternalRoadsGetter(() => roadsFcRef.current);
+    }
+  }, [setExternalRoadsGetter]);
+
+  // fetch / react to active+boundary (unchanged from your version)
+  const maybeFetch = React.useCallback(async () => {
+    const hasBoundary = boundary && Array.isArray(boundary) && boundary.length >= 3;
+    if (!active || !hasBoundary) {
+      removeAllGuides();
+      roadsFcRef.current = null;
+      lastBBoxRef.current = null;
+      return;
+    }
+    const coords = boundary.map(([lat, lng]) => [lng, lat]);
+    const poly = turf.polygon([[...coords, coords[0]]]);
+    const bboxArr = turf.bbox(poly);
+    const cur = bboxArr.join(",");
+
+    if (lastBBoxRef.current && cur === lastBBoxRef.current) {
+      rebuildGuides();
+      return;
+    }
+
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+    try {
+      const fc = await fetchOSMRoadsForBBox(bboxArr);
+      roadsFcRef.current = fc;
+      lastBBoxRef.current = cur;
+      rebuildGuides();
+      console.log("[snap] guides visible for roads:", fc.features.length);
+    } catch (err) {
+      console.warn("[snap] failed to fetch guides:", err);
+    } finally {
+      fetchingRef.current = false;
+    }
+  }, [active, boundary, rebuildGuides, removeAllGuides]);
+
+  useEffect(() => {
+    if (!active) {
+      roadsFcRef.current = null;
+      lastBBoxRef.current = null;
+      removeAllGuides();
+      return;
+    }
+    setTimeout(() => { try { maybeFetch(); } catch {} }, 0);
+    return () => { removeAllGuides(); };
+  }, [active, maybeFetch, removeAllGuides]);
+
+  // rebuild on finalized boundary (unchanged from your version)
+  useEffect(() => {
+    const handler = () => {
+      lastBBoxRef.current = null;
+      removeAllGuides();
+      setTimeout(() => { try { maybeFetch(); } catch {} }, 0);
+    };
+    try { map.on('ps:boundary-finalized', handler); } catch {}
+    return () => { try { map.off('ps:boundary-finalized', handler); } catch {} };
+  }, [map, removeAllGuides, maybeFetch]);
+
+  return null;
+}
+
+function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boundary }) {
   const map = useMap();
   const drawnLayerGroupRef = useRef(L.featureGroup());
   const initRef = useRef(false);
+
+  // working state during a draw
+  const workingRef   = useRef(null);   // leaflet layer being drawn
+  const roadsRef     = useRef(null);   // turf FC of roads in view
+  const guidesRef    = useRef(null);   // leaflet FeatureGroup of snap guides
+  const offsetRef    = useRef(null);   // turf LineString (offset roadside)
+  const snapSideRef  = useRef(snapSide);
+  useEffect(() => { snapSideRef.current = snapSide; }, [snapSide]);
+  
+  const clearGuides = React.useCallback(() => {
+    if (guidesRef.current) {
+      try { map.removeLayer(guidesRef.current); } catch {}
+      guidesRef.current = null;
+    }
+  }, [map]);
+
+  useEffect(() => {
+    if (snapSide === "off") {
+      // clear any per-draw, invisible snapping guides and offset line
+      if (typeof clearGuides === "function") clearGuides();
+      offsetRef.current = null;
+    }
+  }, [snapSide, clearGuides]);
+
+  // --- helpers ---
+
+  const snapAllVertices = React.useCallback((layer) => {
+    const off = offsetRef.current;
+    if (!off || !layer?.getLatLngs) return;
+
+    let latlngs = layer.getLatLngs();
+    const nested = Array.isArray(latlngs) && Array.isArray(latlngs[0]) && latlngs[0].lat === undefined;
+    if (nested) latlngs = latlngs[0];
+
+    for (let i = 0; i < latlngs.length; i++) {
+      const ll = latlngs[i];
+      const np = turf.nearestPointOnLine(off, turf.point([ll.lng, ll.lat]), { units: "meters" });
+      const snapped = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+      latlngs[i] = snapped;
+    }
+    if (nested) layer.setLatLngs([latlngs]); else layer.setLatLngs(latlngs);
+    layer.redraw?.();
+  }, []);
+
+  const guidesToLeafletLayers = React.useCallback((guidesFc) => {
+    const group = L.featureGroup();
+    guidesFc.features.forEach((f) => {
+      const latlngs = f.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+      const pl = L.polyline(latlngs, {
+        color: "#000",
+        opacity: 0.25,         // keep invisible in production
+        weight: 14,         // large hitbox for snapping
+        interactive: true,
+        pmIgnore: false,
+        snapIgnore: false,
+      });
+      pl._isSnapGuide = true; // flag for cleanup
+      if (pl.pm) {
+        pl.pm.setOptions({ pmIgnore: false, snapIgnore: false });
+        if (L.PM && L.PM.reInitLayer) L.PM.reInitLayer(pl);
+      }
+      group.addLayer(pl);
+    });
+    group.addTo(map);
+    if (L.PM && L.PM.reInitLayer) {
+      group.eachLayer((lyr) => { try { L.PM.reInitLayer(lyr); } catch {} });
+    }
+    return group;
+  }, [map]);
+
+  const buildOffsetGuides = React.useCallback((roadFeature, side="left", meters=4) => {
+    const dist = side === "left" ? meters : -meters;
+    const off  = turf.lineOffset(roadFeature, dist, { units: "meters" });
+    const fc   = turf.featureCollection([off]);
+    clearGuides();
+    guidesRef.current = guidesToLeafletLayers(fc);
+    offsetRef.current = off;               // store for snapping all vertices
+    // make sure global snap is on
+    map.pm.setGlobalOptions({ snappable: true, snapDistance: 60, snapSegment: true, snapMiddle: false });
+    map.pm.enableGlobalSnap?.();
+  }, [clearGuides, guidesToLeafletLayers, map]);
+
+
+  // choose left/right in **projected pixels** (robust)
+  const computeSideForClick = React.useCallback((roadFeature, clickLngLat) => {
+    const pt = turf.point(clickLngLat);
+    const nearest = turf.nearestPointOnLine(roadFeature, pt, { units: "meters" });
+    const coords = roadFeature.geometry.coordinates;
+    const idx = Math.max(0, Math.min((nearest.properties?.index ?? 0), coords.length - 2));
+    const [aLng, aLat] = coords[idx], [bLng, bLat] = coords[idx + 1];
+    const [nLng, nLat] = nearest.geometry.coordinates;
+
+    // project to pixels
+    const A = map.project(L.latLng(aLat, aLng));
+    const B = map.project(L.latLng(bLat, bLng));
+    const N = map.project(L.latLng(nLat, nLng));
+    const C = map.project(L.latLng(clickLngLat[1], clickLngLat[0]));
+
+    const roadVec  = { x: B.x - A.x, y: B.y - A.y };
+    const clickVec = { x: C.x - N.x, y: C.y - N.y };
+    const cross = roadVec.x * clickVec.y - roadVec.y * clickVec.x;
+    return cross > 0 ? "left" : "right";
+  }, [map]);
+
+  const findClosestRoad = React.useCallback((roadsFc, clickLngLat) => {
+    let best = null, bestDist = Infinity;
+    const pt = turf.point(clickLngLat);
+    for (const f of roadsFc.features) {
+      try {
+        const nearest = turf.nearestPointOnLine(f, pt, { units: "meters" });
+        const d = Number.isFinite(nearest.properties?.dist) ? nearest.properties.dist : Infinity;
+        if (d < bestDist) { bestDist = d; best = f; }
+      } catch {}
+    }
+    return best;
+  }, []);
+
+  const snapMarkerAndPolyline = React.useCallback((marker, layer) => {
+    const off = offsetRef.current;
+    if (!off || !marker || !layer) return;
+
+    const m = marker.getLatLng();
+    const np = turf.nearestPointOnLine(off, turf.point([m.lng, m.lat]), { units: "meters" });
+    const snappedLL = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+
+    // move the interactive handle
+    marker.setLatLng(snappedLL);
+
+    // update the working polyline’s last vertex
+    let latlngs = layer.getLatLngs();
+    // normalize possible nesting ([[LatLng,...]])
+    const nested = Array.isArray(latlngs) && Array.isArray(latlngs[0]) && latlngs[0].lat === undefined;
+    if (nested) latlngs = latlngs[0];
+
+    if (latlngs.length) {
+      latlngs[latlngs.length - 1] = snappedLL;
+      if (nested) layer.setLatLngs([latlngs]); else layer.setLatLngs(latlngs);
+      layer.redraw?.();
+    }
+  }, []);
 
   useEffect(() => {
     if (initRef.current) return;
@@ -508,27 +975,151 @@ function GeomanDraw({ onCreated, onEdited, onDeleted }) {
       editMode: true,
       dragMode: false,
       cutPolygon: false,
-      removalMode: true,
+      removalMode: true
     });
 
     map.pm.setPathOptions({ color: "#2563eb", weight: 5 });
+    map.pm.setGlobalOptions({
+      snappable: true,
+      snapDistance: 30,
+      snapSegment: true,
+      snapMiddle: false,
+    });
 
+    
+    // ---- START DRAW (bind to working layer) ----
+    map.on("pm:drawstart", async (e) => {
+      if (e.shape !== "Line" && e.shape !== "Polyline") return;
+
+      workingRef.current = e.workingLayer || null;
+      clearGuides();
+
+      if (snapSideRef.current === "off") return;
+
+      // Enable Geoman snapping to any registered snap layers (our invisible hitboxes)
+      if (e.workingLayer?.pm) {
+        e.workingLayer.pm.setOptions({
+          snappable: true,
+          snapDistance: 60,
+          snapSegment: true,
+          snapMiddle: true
+        });
+      }
+      map.pm.setGlobalOptions({
+        snappable: true,
+        snapDistance: 60,
+        snapSegment: true,
+        snapMiddle: true
+      });
+      map.pm.enableGlobalSnap?.();
+    });
+
+    // ---- VERTEX ADDED (force snap to nearest road if not already snapped) ----
+    map.on("pm:vertexadded", (e) => {
+      try {
+        if (snapSideRef.current === "off") return;
+
+        // active working layer and roads
+        const wrk = e.workingLayer || workingRef.current;
+        if (!wrk || !wrk.getLatLngs) return;
+
+        const roadsFc = (typeof getRoadsFc === "function") ? getRoadsFc() : null;
+        if (!roadsFc || !roadsFc.features?.length) return;
+
+        // click location
+        const clickLngLat = [e.latlng.lng, e.latlng.lat];
+
+        // find nearest road + decide side based on click
+        const road = findClosestRoad(roadsFc, clickLngLat);
+        if (!road) return;
+
+        const side = computeSideForClick(road, clickLngLat);
+        const dist = side === "left" ? 4 : -4;
+        const off = turf.lineOffset(road, dist, { units: "meters" });
+        offsetRef.current = off;
+
+        // snap the newly created vertex (marker + layer)
+        const np = turf.nearestPointOnLine(off, turf.point(clickLngLat), { units: "meters" });
+        const snappedLL = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+
+        // move the interactive handle when available
+        const marker = e.marker;
+        if (marker?.setLatLng) marker.setLatLng(snappedLL);
+
+        // replace the last vertex in the working polyline
+        let latlngs = wrk.getLatLngs();
+        const nested = Array.isArray(latlngs) && Array.isArray(latlngs[0]) && latlngs[0].lat === undefined;
+        if (nested) latlngs = latlngs[0];
+        if (latlngs.length) {
+          latlngs[latlngs.length - 1] = snappedLL;
+          if (nested) wrk.setLatLngs([latlngs]); else wrk.setLatLngs(latlngs);
+          wrk.redraw?.();
+        }
+      } catch {}
+    });
+
+    // ---- CONTINUOUS CURSOR SNAP (while moving mouse in draw mode) ----
+    map.on("pm:drawmousemove", (e) => {
+      try {
+        if (snapSideRef.current === "off") return;
+
+        const wrk = e.workingLayer || workingRef.current;
+        if (!wrk || !wrk.getLatLngs) return;
+
+        const roadsFc = (typeof getRoadsFc === "function") ? getRoadsFc() : null;
+        if (!roadsFc || !roadsFc.features?.length) return;
+
+        const clickLngLat = [e.latlng.lng, e.latlng.lat];
+
+        // pick nearest road and compute side vs. the click
+        const road = findClosestRoad(roadsFc, clickLngLat);
+        if (!road) return;
+
+        const side = computeSideForClick(road, clickLngLat);
+        const dist = side === "left" ? 4 : -4;
+        const off = turf.lineOffset(road, dist, { units: "meters" });
+        offsetRef.current = off;
+
+        // snap the floating cursor position to the offset line
+        const np = turf.nearestPointOnLine(off, turf.point(clickLngLat), { units: "meters" });
+        const snappedLL = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+
+        // Update the working polyline so the preview point follows the snapped location
+        let latlngs = wrk.getLatLngs();
+        const nested = Array.isArray(latlngs) && Array.isArray(latlngs[0]) && latlngs[0].lat === undefined;
+        if (nested) latlngs = latlngs[0];
+
+        if (latlngs.length === 0) {
+          // if no vertices yet, let Geoman place the first on click; we only preview
+          wrk.addLatLng(snappedLL);
+        } else {
+          latlngs[latlngs.length - 1] = snappedLL;
+          if (nested) wrk.setLatLngs([latlngs]); else wrk.setLatLngs(latlngs);
+        }
+        wrk.redraw?.();
+      } catch {}
+    });
+
+    // ---- END DRAW ----
+    map.on("pm:drawend", () => {
+      clearGuides();
+      workingRef.current = null;
+      roadsRef.current   = null;
+      offsetRef.current  = null;
+    });
+
+    // create / edit / remove -> hand off to React state
     map.on("pm:create", (e) => {
       const { layer, shape } = e;
       const fid = crypto.randomUUID();
       layer._fid = fid;
-
       const geo = layer.toGeoJSON();
-
       if (shape === "Line") {
-        onCreated(geo, layer, "polyline");
-        layer.remove();
+        onCreated(geo, layer, "polyline"); layer.remove();
       } else if (shape === "Polygon") {
-        onCreated(geo, layer, "polygon");
-        layer.remove();
+        onCreated(geo, layer, "polygon"); layer.remove();
       } else if (shape === "Rectangle") {
-        onCreated(geo, layer, "rectangle");
-        layer.remove();
+        onCreated(geo, layer, "rectangle"); layer.remove();
       }
     });
 
@@ -543,10 +1134,20 @@ function GeomanDraw({ onCreated, onEdited, onDeleted }) {
       if (!layer || !layer._fid) return;
       onDeleted?.([layer._fid]);
     });
-  }, [map, onCreated, onEdited, onDeleted]);
+  }, [
+    map,
+    clearGuides,
+    fetchOSMRoadsForBBox,
+    buildOffsetGuides,
+    computeSideForClick,
+    findClosestRoad,
+    snapMarkerAndPolyline,
+    onCreated, onEdited, onDeleted
+  ]);
 
   return null;
 }
+
 
 async function compressImage(file, maxW = 1280, quality = 0.75) {
   const imgUrl = URL.createObjectURL(file);
@@ -796,6 +1397,14 @@ function PolylineWithGeoman({ feature, style, onEdit, onDelete, onClick, childre
     // keep edit OFF by default (no vertices shown)
     try { if (layer.pm) layer.pm.disable(); } catch {}
 
+    // Allow this layer to be used as a snap target
+    if (layer.pm) {
+      try { layer.pm.setOptions({ pmIgnore: false, snapIgnore: false }); } catch {}
+    }
+    if (L.PM && L.PM.reInitLayer) {
+      try { L.PM.reInitLayer(layer); } catch {}
+    }
+
     const handleEdit = () => {
       const geo = layer.toGeoJSON();
       onEdit?.(feature.properties._id, geo);
@@ -891,6 +1500,8 @@ export default function JenaParkingMap() {
   const [lang, setLang] = useState("en");
   const t = translations[lang];
   const [panelOpen, setPanelOpen] = useState(false);
+  const [snapSide, setSnapSide] = useState("off"); // "off" | "auto"
+  const snapActive = snapSide === "auto" && Array.isArray(boundary) && boundary.length >= 3;
 
   useAutosave(features, setFeatures, boundary, setBoundary);
 
@@ -903,7 +1514,11 @@ export default function JenaParkingMap() {
           const latlngs = ring.map(([lng, lat]) => [lat, lng]);
           setBoundary(latlngs);
           const map = layer?._map;
-          if (map) map.fitBounds(L.polygon(latlngs).getBounds(), { padding: [20, 20] });
+          if (map) {
+  	    map.fitBounds(L.polygon(latlngs).getBounds(), { padding: [20, 20] });
+  	    // tell SnapGuides to fetch for this fresh boundary
+  	    setTimeout(() => { try { map.fire('ps:boundary-finalized'); } catch {} }, 0);
+	  }
         } else {
           console.warn("No ring coords found for boundary:", coords);
         }
@@ -1014,7 +1629,7 @@ export default function JenaParkingMap() {
   return (
     <div style={{ position: "relative", width: "100%", height: "100dvh", overflow: "hidden" }}>
       {/* Language selector (top-left, above map) */}
-      <div style={{ position: "absolute", top: 10, left: 44, zIndex: 1001 }}>
+      <div style={{ position: "absolute", top: 10, left: 44, zIndex: 999 }}>
         <select
           value={lang}
           onChange={(e) => setLang(e.target.value)}
@@ -1029,6 +1644,26 @@ export default function JenaParkingMap() {
         >
           <option value="en">English</option>
           <option value="de">Deutsch</option>
+        </select>
+      </div>
+
+      {/* Snap control (mid-left, below location toggle) */}
+      <div style={{ position:"absolute", top: 10, left: 140, zIndex: 999 }}>
+        <select
+          value={snapSide}
+          onChange={(e) => {
+	    const val = e.target.value;
+	    if (val === "auto" && (!boundary || !Array.isArray(boundary) || boundary.length < 3)) {
+	      alert("Please draw a study area first (use the polygon/rectangle tool).");
+	      return;
+	    }
+	    setSnapSide(val);
+	  }}
+          style={{ padding:"6px 8px", border:"1px solid #ddd", borderRadius:8, background:"rgba(255,255,255,0.95)", fontSize:13 }}
+          aria-label="Snap mode"
+        >
+          <option value="off">Snap: Off</option>
+          <option value="auto">Snap: Auto</option>
         </select>
       </div>
 
@@ -1050,15 +1685,18 @@ export default function JenaParkingMap() {
         }}
       >
         <TileLayer
-  	  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors'
-  	  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-  	  maxNativeZoom={19}   // tiles exist to z=19
-  	  maxZoom={22}         // allow zooming past 19 by scaling
-  	  keepBuffer={5}       // keep more tiles around to avoid flashes
-	/>
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          // tiles exist to z=19
+          maxNativeZoom={19}
+          // allow zooming past 19 by scaling
+          maxZoom={22}
+          // keep more tiles around to avoid flashes
+          keepBuffer={5}
+        />
 
         {boundary && (
-          <Polygon positions={boundary} pathOptions={{ color: "#111827", weight: 2, dashArray: "6 6", fillOpacity: 0.08 }} interactive={false} />
+          <EditableBoundary boundary={boundary} setBoundary={setBoundary} />
         )}
 
         {panelOpen && (
@@ -1128,7 +1766,24 @@ export default function JenaParkingMap() {
           );
         })}
 
-        <GeomanDraw onCreated={handleCreated} />
+        {/* Visible guides and pre-fetched roads when Snap: Auto */}
+        {snapActive && (
+          <SnapGuides
+            active={true}
+            boundary={boundary}
+            setExternalRoadsGetter={(getterFactory) => { JenaParkingMap._getRoadsFc = getterFactory; }}
+            offsetMeters={4}
+          />
+        )}
+        <GeomanDraw
+          onCreated={handleCreated}
+          onEdited={() => {}}
+          onDeleted={() => {}}
+          snapSide={snapSide}
+          // call the stored getter to obtain the FeatureCollection
+          getRoadsFc={() => (typeof JenaParkingMap._getRoadsFc === "function" ? JenaParkingMap._getRoadsFc() : null)}
+          boundary={boundary}
+        />
         <LocateControl />
       </MapContainer>
 
@@ -1145,7 +1800,7 @@ export default function JenaParkingMap() {
 
       <LegendControl t={t} />
 
-      {/* Hint bar — localized */}
+    {/*
       <div
         style={{
           position: "absolute",
@@ -1164,6 +1819,7 @@ export default function JenaParkingMap() {
       >
         {t.drawHint}
       </div>
+    */}
     </div>
   );
 }
