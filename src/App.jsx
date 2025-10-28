@@ -622,6 +622,46 @@ function EditableBoundary({ boundary, setBoundary }) {
   return null;
 }
 
+// Global guard to ensure snap guides (blue/green helpers) never become editable
+function PmGuideGuard() {
+  const map = useMap();
+
+  React.useEffect(() => {
+    const guard = () => {
+      try {
+        map.eachLayer((lyr) => {
+          if (lyr && lyr._isSnapGuide && lyr.pm) {
+            try {
+              // keep guides non-editable and not draggable
+              lyr.pm.disable();
+              lyr.pm.setOptions({ snappable: false, draggable: false, pmIgnore: false, snapIgnore: false });
+            } catch {}
+          }
+        });
+      } catch {}
+    };
+
+    // run once immediately (covers the case where Edit was already enabled)
+    guard();
+
+    try {
+      map.on("pm:globaleditmodetoggled", guard);
+      map.on("pm:enable", guard);
+      map.on("pm:disable", guard);
+    } catch {}
+
+    return () => {
+      try {
+        map.off("pm:globaleditmodetoggled", guard);
+        map.off("pm:enable", guard);
+        map.off("pm:disable", guard);
+      } catch {}
+    };
+  }, [map]);
+
+  return null;
+}
+
 // Persistent, visible snap guides for "Snap: Auto"
 // - Fetches OSM roads for the current (padded) bounds when active
 // - Draws visible offset guides for both sides so users can see where snapping will happen
@@ -632,15 +672,58 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
   const lastBBoxRef = useRef(null);
   const fetchingRef = useRef(false);
 
-  // --- helper: remove all guides (unchanged) ---
+  // --- loading UI state for progress bar ---
+  const [loading, setLoading] = React.useState(false);
+  const [progress, setProgress] = React.useState(0);
+  const progressTimerRef = useRef(null);
+
+  const beginLoading = React.useCallback(() => {
+    try { if (progressTimerRef.current) { clearInterval(progressTimerRef.current); } } catch {}
+    setLoading(true);
+    setProgress(0.1);
+    progressTimerRef.current = setInterval(() => {
+      setProgress((p) => Math.min(0.85, p + 0.03)); // creep up to 85% while waiting
+    }, 200);
+  }, []);
+
+  const endLoading = React.useCallback(() => {
+    try {
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current);
+        progressTimerRef.current = null;
+      }
+    } catch {}
+    setProgress(1);
+    setTimeout(() => {
+      setLoading(false);
+      setProgress(0);
+    }, 400);
+  }, []);
+
+  // --- helper: remove all guides (updated for pm:globaleditmodetoggled cleanup) ---
   const removeAllGuides = React.useCallback(() => {
     if (guidesGroupRef.current) {
-      try { map.removeLayer(guidesGroupRef.current); } catch {}
+      const g = guidesGroupRef.current;
+      try {
+        if (g._ensureGuidesDisabled) {
+          try { map.off("pm:globaleditmodetoggled", g._ensureGuidesDisabled); } catch {}
+        }
+        map.removeLayer(g);
+      } catch {}
       guidesGroupRef.current = null;
     }
     map.eachLayer((lyr) => {
       try { if (lyr && lyr._isSnapGuide) map.removeLayer(lyr); } catch {}
     });
+    // also stop any progress animation
+    try {
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current);
+        progressTimerRef.current = null;
+      }
+    } catch {}
+    setLoading(false);
+    setProgress(0);
   }, [map]);
 
   // --- NEW helper: clip a LineString to a Polygon and return only inside segments ---
@@ -695,11 +778,12 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
         const clippedLeft  = clipLineToPolygon(left,  poly);
         const clippedRight = clipLineToPolygon(right, poly);
 
+        // --- REPLACEMENT addSegs body ---
         const addSegs = (segments, isLeft) => {
           segments.forEach((seg) => {
             const latlngs = seg.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
 
-            // Visible dashed guide
+            // 1) Visible dashed guide (never interactive / never editable)
             const show = L.polyline(latlngs, {
               color: isLeft ? "#2563eb" : "#10b981",
               weight: 3,
@@ -709,27 +793,35 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
               pmIgnore: true,
             });
             show._isSnapGuide = true;
+            show._isHit = false;
             group.addLayer(show);
 
-            // Invisible thick hitbox for snapping
+            // 2) Invisible hitbox for Geoman's internal snapping
             const hit = L.polyline(latlngs, {
               color: "#000",
-              opacity: 0,
-              weight: 16,
+              opacity: 0,         // fully invisible
+              weight: 16,         // wider target for snapping
               interactive: true,
-              pmIgnore: false,
+              pmIgnore: false,    // IMPORTANT: register with Geoman
             });
             hit._isSnapGuide = true;
+            hit._isHit = true;
             group.addLayer(hit);
 
+            // Ensure the hit layer NEVER becomes editable (even in global Edit mode)
             if (hit.pm) {
-              try { hit.pm.setOptions({ pmIgnore: false, snapIgnore: false }); } catch {}
+              try {
+                // do not allow editing/dragging
+                hit.pm.setOptions({ snappable: false, draggable: false });
+                hit.pm.disable(); // make sure no edit vertices are shown
+              } catch {}
             }
             if (L.PM && L.PM.reInitLayer) {
               try { L.PM.reInitLayer(hit); } catch {}
             }
           });
         };
+        // --- END REPLACEMENT addSegs body ---
 
         addSegs(clippedLeft,  true);
         addSegs(clippedRight, false);
@@ -737,6 +829,22 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
     });
 
     group.addTo(map);
+    // --- ADD block to keep hit layers disabled whenever global edit mode toggles ---
+    const ensureGuidesDisabled = () => {
+      try {
+        group.eachLayer((lyr) => {
+          if (lyr && lyr._isHit && lyr.pm) {
+            try { lyr.pm.disable(); } catch {}
+          }
+        });
+      } catch {}
+    };
+    // Disable right away (in case Edit was already on)
+    ensureGuidesDisabled();
+    try { map.on("pm:globaleditmodetoggled", ensureGuidesDisabled); } catch {}
+    // Remember to detach this when we rebuild/clear the group
+    group._ensureGuidesDisabled = ensureGuidesDisabled;
+    // --- END block ---
     guidesGroupRef.current = group;
   }, [map, offsetMeters, boundary, clipLineToPolygon]);
 
@@ -769,41 +877,97 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
     if (fetchingRef.current) return;
     fetchingRef.current = true;
     try {
+      beginLoading();
       const fc = await fetchOSMRoadsForBBox(bboxArr);
+      setProgress(0.9);
       roadsFcRef.current = fc;
       lastBBoxRef.current = cur;
       rebuildGuides();
+      endLoading();
       console.log("[snap] guides visible for roads:", fc.features.length);
     } catch (err) {
+      endLoading();
       console.warn("[snap] failed to fetch guides:", err);
     } finally {
       fetchingRef.current = false;
     }
-  }, [active, boundary, rebuildGuides, removeAllGuides]);
+  }, [active, boundary, rebuildGuides, removeAllGuides, beginLoading, endLoading]);
 
   useEffect(() => {
     if (!active) {
       roadsFcRef.current = null;
       lastBBoxRef.current = null;
       removeAllGuides();
+      setLoading(false);
+      setProgress(0);
       return;
     }
     setTimeout(() => { try { maybeFetch(); } catch {} }, 0);
     return () => { removeAllGuides(); };
   }, [active, maybeFetch, removeAllGuides]);
 
-  // rebuild on finalized boundary (unchanged from your version)
+  // rebuild on finalized boundary (unchanged from your version, but add loading UI)
   useEffect(() => {
     const handler = () => {
+      beginLoading();
       lastBBoxRef.current = null;
       removeAllGuides();
-      setTimeout(() => { try { maybeFetch(); } catch {} }, 0);
+      setTimeout(async () => {
+        try { await maybeFetch(); } catch {}
+        endLoading();
+      }, 0);
     };
     try { map.on('ps:boundary-finalized', handler); } catch {}
     return () => { try { map.off('ps:boundary-finalized', handler); } catch {} };
-  }, [map, removeAllGuides, maybeFetch]);
+  }, [map, removeAllGuides, maybeFetch, beginLoading, endLoading]);
 
-  return null;
+  return (
+    <>
+      {loading && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1102,
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              width: 260,
+              height: 10,
+              borderRadius: 9999,
+              background: "rgba(0,0,0,0.12)",
+              overflow: "hidden",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+            }}
+          >
+            <div
+              style={{
+                width: `${Math.round(progress * 100)}%`,
+                height: "100%",
+                background: "#2563eb",
+              }}
+            />
+          </div>
+          <div
+            style={{
+              marginTop: 6,
+              textAlign: "center",
+              fontSize: 12,
+              color: "#111827",
+              fontWeight: 600,
+              textShadow: "0 1px 2px rgba(255,255,255,0.6)",
+            }}
+          >
+            {Math.round(progress * 100)}% {progress < 1 ? "Loading snap guides…" : "Done"}
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
 
 function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boundary }) {
@@ -1766,6 +1930,8 @@ export default function JenaParkingMap() {
           );
         })}
 
+        {/* Global guard for snap guides */}
+        {snapActive && <PmGuideGuard />}
         {/* Visible guides and pre-fetched roads when Snap: Auto */}
         {snapActive && (
           <SnapGuides

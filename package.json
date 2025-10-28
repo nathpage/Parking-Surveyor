@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "predeploy": "vite build && cp dist/index.html dist/404.html",
-    "deploy": "gh-pages -d dist"
+    "deploy": "gh-pages -d dist",
+    "publish": "set -e; printf 'Commit message: '; read msg; git fetch origin; BR=$(git rev-parse --abbrev-ref HEAD); REM=origin/$BR; BEHIND=$(git rev-list --left-right --count HEAD...$REM 2>/dev/null | awk '{print $2}'); if [ \"$BEHIND\" -ne 0 ]; then echo '❌ Your branch is behind the remote. Please run: git pull --rebase'; exit 1; fi; if [ -n \"$(git status --porcelain)\" ]; then git add .; git commit -m \"${msg:-update}\" || true; fi; if [ -n \"$(git ls-files -u)\" ]; then echo '❌ Merge conflicts detected. Resolve them and re-run npm run publish.'; exit 1; fi; git push && npm run build && npm run deploy"
   },
   "dependencies": {
     "@geoman-io/leaflet-geoman-free": "^2.18.3",
