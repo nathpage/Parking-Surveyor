@@ -1,3 +1,4 @@
+```jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, TileLayer, FeatureGroup, Polyline, Popup, useMap, Rectangle, Polygon } from "react-leaflet";
 import L from "leaflet";
@@ -296,8 +297,7 @@ function MetadataForm({ feature, onSave, onCancel }) {
 
           <label style={{gridColumn:"1 / -1", fontSize:14}}>Rules / Hours
             <input style={{width:"100%", marginTop:6, padding:"6px 8px", border:"1px solid #ddd", borderRadius:6}}
-              value={rules} onChange={e=>setRules(e.target.value)}
-              placeholder="e.g., Residents Mo–Fr 8–18h; free otherwise"/>
+              value={rules} onChange={e=>setRules(e.target.value)} placeholder="e.g., Residents Mo–Fr 8–18h; free otherwise"/>
           </label>
 
           <label style={{gridColumn:"1 / -1", fontSize:14}}>Notes
@@ -504,3 +504,4 @@ export default function JenaParkingMap() {
   </div>
   );
 }
+```

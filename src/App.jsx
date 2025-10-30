@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { MapContainer, TileLayer, Polyline, Popup, useMap, Polygon, Circle, CircleMarker } from "react-leaflet";
+import { SnapLoadingState } from "./utils/loadingState";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "@geoman-io/leaflet-geoman-free";
@@ -9,9 +10,13 @@ import { exportPdf, exportDocx } from "./exports/docs";
 import { translations } from "./i18n";
 import * as turf from "@turf/turf";
 import "leaflet-geometryutil"; // adds L.GeometryUtil.* helpers
+import { safeReInitLayer, createGuidesFromFeatureCollection, safeDisablePm, safeSetPmOptions } from "./utils/geomanHelpers";
+import useGeomanLayer from "./hooks/useGeomanLayer";
+import useGuideManager from "./hooks/useGuideManager";
+import useGlobalEditGuard from "./hooks/useGlobalEditGuard";
 
 // Shared Overpass helper (fetch OSM roads for bbox)
-async function fetchOSMRoadsForBBox(bboxArr) {
+async function fetchOSMRoadsForBBox(bboxArr, onProgress) {
   const [w, s, e, n] = bboxArr;
   const query = `
     [out:json][timeout:25];
@@ -23,19 +28,73 @@ async function fetchOSMRoadsForBBox(bboxArr) {
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.openstreetmap.ru/api/interpreter"
   ];
+  
   let data = null, lastErr = null;
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        body: `data=${encodeURIComponent(query)}`
-      });
-      if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
-      data = await res.json(); break;
-    } catch (err) { lastErr = err; }
+  const maxRetries = 2; // Try each endpoint up to 2 times on timeout
+  
+  for (let endpointIdx = 0; endpointIdx < endpoints.length; endpointIdx++) {
+    const url = endpoints[endpointIdx];
+    
+    for (let retry = 0; retry < maxRetries; retry++) {
+      try {
+        if (onProgress) {
+          const attemptInfo = retry > 0 ? ` (retry ${retry}/${maxRetries - 1})` : '';
+          onProgress(`Fetching from server ${endpointIdx + 1}/${endpoints.length}${attemptInfo}...`);
+        }
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+        
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (res.status === 504 || res.status === 502 || res.status === 503) {
+          lastErr = new Error(`Server temporarily unavailable (${res.status})`);
+          if (retry < maxRetries - 1) {
+            if (onProgress) {
+              onProgress(`Server busy, retrying in 2 seconds...`);
+            }
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue; // Retry this endpoint
+          }
+          continue; // Move to next endpoint
+        }
+        
+        if (!res.ok) { 
+          lastErr = new Error(`HTTP ${res.status}`); 
+          continue; // Try next endpoint
+        }
+        
+        data = await res.json(); 
+        break; // Success!
+      } catch (err) { 
+        lastErr = err;
+        if (err.name === 'AbortError') {
+          lastErr = new Error('Request timed out after 30 seconds');
+          if (onProgress && retry < maxRetries - 1) {
+            onProgress(`Request timed out, retrying...`);
+          }
+          if (retry < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue; // Retry
+          }
+        }
+      }
+    }
+    
+    if (data) break; // Success, no need to try other endpoints
   }
-  if (!data) throw lastErr || new Error("Overpass request failed");
+  
+  if (!data) {
+    const errorMsg = lastErr?.message || "Overpass request failed";
+    throw new Error(`Unable to load street data: ${errorMsg}. Please try again or check your internet connection.`);
+  }
 
   const features = (data.elements || [])
     .filter(el => el.type === "way" && Array.isArray(el.geometry))
@@ -535,19 +594,25 @@ function EditableBoundary({ boundary, setBoundary }) {
         color: "#111827",
         weight: 2,
         dashArray: "6 6",
-        fillOpacity: 0.08
+        fillOpacity: 0.08,
+        interactive: false // Make it non-interactive
       });
       layer.addTo(map);
 
-      // register the layer with Geoman so global "Edit layers" can edit it
+      // Completely disable any editing capabilities
       if (layer.pm) {
         try {
-          layer.pm.setOptions({ snappable: false, pmIgnore: false });
+          safeSetPmOptions(layer, {
+            snappable: false,
+            pmIgnore: true,
+            preventMarkerRemoval: true,
+            draggable: false,
+            allowEditing: false,
+          });
+          layer.pm.disable();
         } catch {}
       }
-      if (L.PM && L.PM.reInitLayer) {
-        try { L.PM.reInitLayer(layer); } catch {}
-      }
+      try { safeReInitLayer(layer); } catch {}
 
             // helper: read current polygon and push into React state
       const commitBoundary = () => {
@@ -559,49 +624,13 @@ function EditableBoundary({ boundary, setBoundary }) {
         } catch {}
       };
 
-      // live update while dragging (optional—to keep state in sync)
-      const onEdit = () => {
-        commitBoundary();
-      };
-      layer.on("pm:edit", onEdit);
-
-      // per-layer finalize when Geoman considers the edit "applied"
-      const onUpdate = () => {
-        commitBoundary();
-        try { map.fire("ps:boundary-finalized"); } catch {}
-      };
-      layer.on("pm:update", onUpdate);
-
-      // global edit mode toggled off (another finalize path)
-      const onGlobalEditToggle = (e) => {
-        if (!e.enabled) {
-          commitBoundary();
-          try { map.fire("ps:boundary-finalized"); } catch {}
-        }
-      };
-      try { map.on("pm:globaleditmodetoggled", onGlobalEditToggle); } catch {}
-
-      // *** IMPORTANT: toolbar "Finish" click in global Edit Layers ***
-      // Geoman emits pm:actionclick for toolbar actions. We use this to
-      // finalize even when pm:update doesn't fire.
-      const onActionClick = (e) => {
-        // e.button is the tool group, e.text is the label ("Finish")
-        if (e?.button === "edit" && String(e?.text).toLowerCase() === "finish") {
-          // allow Geoman to write the latest vertices, then commit + finalize
-          setTimeout(() => {
-            commitBoundary();
-            try { map.fire("ps:boundary-finalized"); } catch {}
-          }, 0);
-        }
-      };
-      try { map.on("pm:actionclick", onActionClick); } catch {}
-
+      // We intentionally do NOT wire Geoman edit listeners for the study
+      // boundary so that it remains non-editable after creation. The
+      // boundary value is set at creation time by the draw handler and
+      // can only be changed by replacing the study area.
       layerRef.current = layer;
       return () => {
-        try { layer.off("pm:edit", onEdit); } catch {}
-        try { layer.off("pm:update", onUpdate); } catch {}
-        try { map.off("pm:globaleditmodetoggled", onGlobalEditToggle); } catch {}
-        try { map.off("pm:actionclick", onActionClick); } catch {}
+        // nothing to remove — editing is disabled for the boundary
       };
     } else {
       // update geometry without recreating
@@ -633,8 +662,8 @@ function PmGuideGuard() {
           if (lyr && lyr._isSnapGuide && lyr.pm) {
             try {
               // keep guides non-editable and not draggable
-              lyr.pm.disable();
-              lyr.pm.setOptions({ snappable: false, draggable: false, pmIgnore: false, snapIgnore: false });
+              safeDisablePm(lyr);
+              safeSetPmOptions(lyr, { snappable: false, draggable: false, pmIgnore: false, snapIgnore: false });
             } catch {}
           }
         });
@@ -644,19 +673,15 @@ function PmGuideGuard() {
     // run once immediately (covers the case where Edit was already enabled)
     guard();
 
+    // Run once to set initial state, but don't respond to edit mode changes
     try {
-      map.on("pm:globaleditmodetoggled", guard);
-      map.on("pm:enable", guard);
-      map.on("pm:disable", guard);
+      guard();
     } catch {}
 
     return () => {
-      try {
-        map.off("pm:globaleditmodetoggled", guard);
-        map.off("pm:enable", guard);
-        map.off("pm:disable", guard);
-      } catch {}
-    };
+      // No event listeners to clean up
+    }
+    
   }, [map]);
 
   return null;
@@ -667,7 +692,15 @@ function PmGuideGuard() {
 // - Draws visible offset guides for both sides so users can see where snapping will happen
 function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary }) {
   const map = useMap();
-  const guidesGroupRef = useRef(null);
+  // guide manager centralizes creation / removal and listener cleanup
+  const guideManager = useGuideManager(map);
+  const { 
+    createFromFc, 
+    removeAll: removeManagedGuides, 
+    disableAll: disableManagedGuides, 
+    groupRef: managedGroupRef,
+    buildOffsetGuides: buildManagedGuides 
+  } = guideManager;
   const roadsFcRef = useRef(null);
   const lastBBoxRef = useRef(null);
   const fetchingRef = useRef(false);
@@ -675,14 +708,23 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
   // --- loading UI state for progress bar ---
   const [loading, setLoading] = React.useState(false);
   const [progress, setProgress] = React.useState(0);
+  const [statusMessage, setStatusMessage] = React.useState('');
+  const [errorMessage, setErrorMessage] = React.useState('');
   const progressTimerRef = useRef(null);
 
-  const beginLoading = React.useCallback(() => {
+  const beginLoading = React.useCallback((message = 'Loading snap guides...') => {
     try { if (progressTimerRef.current) { clearInterval(progressTimerRef.current); } } catch {}
     setLoading(true);
     setProgress(0.1);
+    setStatusMessage(message);
+    setErrorMessage('');
+    SnapLoadingState.setState({ loading: true, progress: 0.1 });
     progressTimerRef.current = setInterval(() => {
-      setProgress((p) => Math.min(0.85, p + 0.03)); // creep up to 85% while waiting
+      setProgress((p) => {
+        const newP = Math.min(0.85, p + 0.03);
+        SnapLoadingState.setState({ loading: true, progress: newP });
+        return newP;
+      });
     }, 200);
   }, []);
 
@@ -694,27 +736,19 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
       }
     } catch {}
     setProgress(1);
+    SnapLoadingState.setState({ loading: true, progress: 1 });
     setTimeout(() => {
       setLoading(false);
       setProgress(0);
+      SnapLoadingState.setState({ loading: false, progress: 0 });
     }, 400);
   }, []);
 
   // --- helper: remove all guides (updated for pm:globaleditmodetoggled cleanup) ---
   const removeAllGuides = React.useCallback(() => {
-    if (guidesGroupRef.current) {
-      const g = guidesGroupRef.current;
-      try {
-        if (g._ensureGuidesDisabled) {
-          try { map.off("pm:globaleditmodetoggled", g._ensureGuidesDisabled); } catch {}
-        }
-        map.removeLayer(g);
-      } catch {}
-      guidesGroupRef.current = null;
-    }
-    map.eachLayer((lyr) => {
-      try { if (lyr && lyr._isSnapGuide) map.removeLayer(lyr); } catch {}
-    });
+    try { removeManagedGuides(); } catch {}
+    // also ensure no stray layers
+    try { map.eachLayer((lyr) => { if (lyr && lyr._isSnapGuide) try { map.removeLayer(lyr); } catch {} }); } catch {}
     // also stop any progress animation
     try {
       if (progressTimerRef.current) {
@@ -726,7 +760,7 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
     setProgress(0);
   }, [map]);
 
-  // --- NEW helper: clip a LineString to a Polygon and return only inside segments ---
+  // --- helper: clip a LineString to a Polygon and return only inside segments ---
   const clipLineToPolygon = React.useCallback((line, polygon) => {
     try {
       if (!line || !polygon) return [];
@@ -753,100 +787,44 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
     }
   }, []);
 
-  // --- REPLACE your existing rebuildGuides with this version ---
+  // Rebuild guides from current roads + boundary and hand to guide manager
   const rebuildGuides = React.useCallback(() => {
-    // clear previous
-    if (guidesGroupRef.current) {
-      try { map.removeLayer(guidesGroupRef.current); } catch {}
-      guidesGroupRef.current = null;
-    }
-    if (!roadsFcRef.current || !roadsFcRef.current.features?.length) return;
+    try {
+      // clear previous managed guides
+      try { removeManagedGuides(); } catch {}
+      if (!roadsFcRef.current || !roadsFcRef.current.features?.length) return;
+      if (!boundary || boundary.length < 3) return;
 
-    // Build turf polygon from boundary (lng,lat order; closed ring)
-    if (!boundary || boundary.length < 3) return;
-    const ringLngLat = boundary.map(([lat, lng]) => [lng, lat]);
-    const poly = turf.polygon([[...ringLngLat, ringLngLat[0]]]);
+      const ringLngLat = boundary.map(([lat, lng]) => [lng, lat]);
+      const poly = turf.polygon([[...ringLngLat, ringLngLat[0]]]);
 
-    const group = L.featureGroup();
+      const features = [];
+      roadsFcRef.current.features.forEach((road) => {
+        try {
+          const left = turf.lineOffset(road, Math.abs(offsetMeters), { units: "meters" });
+          const right = turf.lineOffset(road, -Math.abs(offsetMeters), { units: "meters" });
+          const clippedLeft = clipLineToPolygon(left, poly);
+          const clippedRight = clipLineToPolygon(right, poly);
 
-    roadsFcRef.current.features.forEach((road) => {
-      try {
-        const left  = turf.lineOffset(road,  Math.abs(offsetMeters), { units: "meters" });
-        const right = turf.lineOffset(road, -Math.abs(offsetMeters), { units: "meters" });
-
-        // clip both sides to the study polygon
-        const clippedLeft  = clipLineToPolygon(left,  poly);
-        const clippedRight = clipLineToPolygon(right, poly);
-
-        // --- REPLACEMENT addSegs body ---
-        const addSegs = (segments, isLeft) => {
-          segments.forEach((seg) => {
-            const latlngs = seg.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-
-            // 1) Visible dashed guide (never interactive / never editable)
-            const show = L.polyline(latlngs, {
-              color: isLeft ? "#2563eb" : "#10b981",
-              weight: 3,
-              opacity: 0.7,
-              dashArray: "4 4",
-              interactive: false,
-              pmIgnore: true,
-            });
-            show._isSnapGuide = true;
-            show._isHit = false;
-            group.addLayer(show);
-
-            // 2) Invisible hitbox for Geoman's internal snapping
-            const hit = L.polyline(latlngs, {
-              color: "#000",
-              opacity: 0,         // fully invisible
-              weight: 16,         // wider target for snapping
-              interactive: true,
-              pmIgnore: false,    // IMPORTANT: register with Geoman
-            });
-            hit._isSnapGuide = true;
-            hit._isHit = true;
-            group.addLayer(hit);
-
-            // Ensure the hit layer NEVER becomes editable (even in global Edit mode)
-            if (hit.pm) {
+          const addSegs = (segments, side) => {
+            segments.forEach((seg) => {
               try {
-                // do not allow editing/dragging
-                hit.pm.setOptions({ snappable: false, draggable: false });
-                hit.pm.disable(); // make sure no edit vertices are shown
+                const feat = turf.lineString(seg.geometry.coordinates, { side });
+                features.push(feat);
               } catch {}
-            }
-            if (L.PM && L.PM.reInitLayer) {
-              try { L.PM.reInitLayer(hit); } catch {}
-            }
-          });
-        };
-        // --- END REPLACEMENT addSegs body ---
+            });
+          };
+          addSegs(clippedLeft, 'left');
+          addSegs(clippedRight, 'right');
+        } catch {}
+      });
 
-        addSegs(clippedLeft,  true);
-        addSegs(clippedRight, false);
-      } catch {}
-    });
-
-    group.addTo(map);
-    // --- ADD block to keep hit layers disabled whenever global edit mode toggles ---
-    const ensureGuidesDisabled = () => {
-      try {
-        group.eachLayer((lyr) => {
-          if (lyr && lyr._isHit && lyr.pm) {
-            try { lyr.pm.disable(); } catch {}
-          }
-        });
-      } catch {}
-    };
-    // Disable right away (in case Edit was already on)
-    ensureGuidesDisabled();
-    try { map.on("pm:globaleditmodetoggled", ensureGuidesDisabled); } catch {}
-    // Remember to detach this when we rebuild/clear the group
-    group._ensureGuidesDisabled = ensureGuidesDisabled;
-    // --- END block ---
-    guidesGroupRef.current = group;
-  }, [map, offsetMeters, boundary, clipLineToPolygon]);
+      const fc = turf.featureCollection(features);
+      try { createFromFc(fc); } catch (err) { console.warn('rebuildGuides.createFromFc failed', err); }
+    } catch (err) {
+      console.warn('rebuildGuides failed', err);
+    }
+  }, [boundary, offsetMeters, clipLineToPolygon, createFromFc, removeManagedGuides]);
 
   // expose roads getter (unchanged)
   useEffect(() => {
@@ -877,17 +855,35 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
     if (fetchingRef.current) return;
     fetchingRef.current = true;
     try {
-      beginLoading();
-      const fc = await fetchOSMRoadsForBBox(bboxArr);
+      beginLoading('Loading street data...');
+      const fc = await fetchOSMRoadsForBBox(bboxArr, (msg) => {
+        setStatusMessage(msg);
+      });
       setProgress(0.9);
+      setStatusMessage('Building guides...');
       roadsFcRef.current = fc;
       lastBBoxRef.current = cur;
       rebuildGuides();
       endLoading();
       console.log("[snap] guides visible for roads:", fc.features.length);
     } catch (err) {
-      endLoading();
       console.warn("[snap] failed to fetch guides:", err);
+      // Stop the progress animation immediately
+      try {
+        if (progressTimerRef.current) {
+          clearInterval(progressTimerRef.current);
+          progressTimerRef.current = null;
+        }
+      } catch {}
+      // Show error state
+      setLoading(false);
+      setProgress(0);
+      setErrorMessage(err.message || 'Failed to load street data');
+      SnapLoadingState.setState({ loading: false, progress: 0 });
+      // Show error for 10 seconds
+      setTimeout(() => {
+        setErrorMessage('');
+      }, 10000);
     } finally {
       fetchingRef.current = false;
     }
@@ -923,46 +919,66 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
 
   return (
     <>
-      {loading && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 1102,
-            pointerEvents: "none",
-          }}
-        >
-          <div
-            style={{
-              width: 260,
-              height: 10,
-              borderRadius: 9999,
-              background: "rgba(0,0,0,0.12)",
-              overflow: "hidden",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
-            }}
-          >
-            <div
-              style={{
-                width: `${Math.round(progress * 100)}%`,
-                height: "100%",
-                background: "#2563eb",
-              }}
-            />
+      {loading && !errorMessage && (
+        <div style={{
+          position: "fixed",
+          bottom: 16,
+          left: "50%",
+          transform: "translateX(-50%)",
+          background: "rgba(255,255,255,0.95)",
+          padding: "8px 12px",
+          borderRadius: 8,
+          boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+          backdropFilter: "blur(4px)",
+          zIndex: 1102,
+        }}>
+          <div style={{fontSize: 13, color: "#374151", textAlign: "center"}}>{statusMessage}</div>
+          <div style={{width: 200, height: 2, background: "#e5e7eb", borderRadius: 1, marginTop: 8, overflow: "hidden"}}>
+            <div style={{height: "100%", background: "#3b82f6", width: `${progress * 100}%`, transition: "width 200ms ease-out"}} />
           </div>
-          <div
-            style={{
-              marginTop: 6,
-              textAlign: "center",
-              fontSize: 12,
-              color: "#111827",
-              fontWeight: 600,
-              textShadow: "0 1px 2px rgba(255,255,255,0.6)",
-            }}
-          >
-            {Math.round(progress * 100)}% {progress < 1 ? "Loading snap guides…" : "Done"}
+        </div>
+      )}
+      {errorMessage && (
+        <div style={{
+          position: "fixed",
+          bottom: 16,
+          left: "50%",
+          transform: "translateX(-50%)",
+          background: "rgba(254, 242, 242, 0.98)",
+          padding: "12px 16px",
+          borderRadius: 8,
+          boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+          backdropFilter: "blur(4px)",
+          zIndex: 1102,
+          maxWidth: "90%",
+          width: 400,
+          border: "1px solid #fecaca"
+        }}>
+          <div style={{display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8}}>
+            <div style={{flex: 1}}>
+              <div style={{fontSize: 13, color: "#991b1b", fontWeight: 500}}>
+                ⚠️ {errorMessage}
+              </div>
+              <div style={{fontSize: 12, color: "#7f1d1d", marginTop: 6}}>
+                Try drawing a smaller study area or try again later.
+              </div>
+            </div>
+            <button
+              onClick={() => setErrorMessage('')}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#991b1b",
+                fontSize: 18,
+                cursor: "pointer",
+                padding: 0,
+                lineHeight: 1,
+                minWidth: "auto"
+              }}
+              title="Dismiss"
+            >
+              ×
+            </button>
           </div>
         </div>
       )}
@@ -970,10 +986,203 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
   );
 }
 
+// Helper function to find shortest path through guide network
+function findShortestGuidePath(map, startInfo, endInfo) {
+  // Collect all guide layers
+  const guides = [];
+  map.eachLayer((layer) => {
+    if (layer._isSnapGuide && layer.getLatLngs) {
+      guides.push(layer);
+    }
+  });
+  
+  if (guides.length === 0) return null;
+  
+  // Build graph: find all intersection points between guides
+  const intersections = [];
+  const connectionThreshold = 0.005; // ~5 meters tolerance for connections
+  
+  // Check each pair of guides for intersections
+  for (let i = 0; i < guides.length; i++) {
+    for (let j = i + 1; j < guides.length; j++) {
+      const line1Coords = guides[i].getLatLngs().map(ll => [ll.lng, ll.lat]);
+      const line2Coords = guides[j].getLatLngs().map(ll => [ll.lng, ll.lat]);
+      
+      const line1 = turf.lineString(line1Coords);
+      const line2 = turf.lineString(line2Coords);
+      
+      try {
+        const intersects = turf.lineIntersect(line1, line2);
+        if (intersects.features.length > 0) {
+          intersects.features.forEach(pt => {
+            intersections.push({
+              point: pt,
+              guides: [guides[i], guides[j]]
+            });
+          });
+        }
+      } catch (e) {
+        // Skip invalid geometries
+      }
+      
+      // Also check endpoints that are very close (within threshold)
+      [0, line1Coords.length - 1].forEach(idx1 => {
+        [0, line2Coords.length - 1].forEach(idx2 => {
+          const pt1 = turf.point(line1Coords[idx1]);
+          const pt2 = turf.point(line2Coords[idx2]);
+          const dist = turf.distance(pt1, pt2, { units: 'kilometers' });
+          if (dist < connectionThreshold) {
+            intersections.push({
+              point: pt1,
+              guides: [guides[i], guides[j]]
+            });
+          }
+        });
+      });
+    }
+  }
+  
+  // Build graph nodes: start point, end point, and all intersections
+  const nodes = [
+    { id: 'start', point: startInfo.point, guide: startInfo.guide },
+    { id: 'end', point: endInfo.point, guide: endInfo.guide },
+    ...intersections.map((inter, idx) => ({
+      id: `inter_${idx}`,
+      point: inter.point,
+      guides: inter.guides
+    }))
+  ];
+  
+  // Build edges with distances
+  const edges = [];
+  
+  // Connect nodes that share a guide
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const node1 = nodes[i];
+      const node2 = nodes[j];
+      
+      // Find a common guide
+      const guide1Set = node1.guides || [node1.guide];
+      const guide2Set = node2.guides || [node2.guide];
+      
+      const sharedGuide = guide1Set.find(g => guide2Set.includes(g));
+      
+      if (sharedGuide) {
+        const dist = turf.distance(node1.point, node2.point, { units: 'kilometers' });
+        edges.push({
+          from: node1.id,
+          to: node2.id,
+          distance: dist,
+          guide: sharedGuide
+        });
+      }
+    }
+  }
+  
+  // Dijkstra's algorithm
+  const distances = {};
+  const previous = {};
+  const unvisited = new Set();
+  
+  nodes.forEach(node => {
+    distances[node.id] = node.id === 'start' ? 0 : Infinity;
+    previous[node.id] = null;
+    unvisited.add(node.id);
+  });
+  
+  while (unvisited.size > 0) {
+    let current = null;
+    let minDist = Infinity;
+    unvisited.forEach(id => {
+      if (distances[id] < minDist) {
+        minDist = distances[id];
+        current = id;
+      }
+    });
+    
+    if (current === null || distances[current] === Infinity) break;
+    if (current === 'end') break;
+    
+    unvisited.delete(current);
+    
+    // Check neighbors
+    edges.forEach(edge => {
+      if (edge.from === current && unvisited.has(edge.to)) {
+        const alt = distances[current] + edge.distance;
+        if (alt < distances[edge.to]) {
+          distances[edge.to] = alt;
+          previous[edge.to] = { id: current, edge };
+        }
+      } else if (edge.to === current && unvisited.has(edge.from)) {
+        const alt = distances[current] + edge.distance;
+        if (alt < distances[edge.from]) {
+          distances[edge.from] = alt;
+          previous[edge.from] = { id: current, edge };
+        }
+      }
+    });
+  }
+  
+  // Reconstruct path
+  if (distances['end'] === Infinity) {
+    return null; // No path found
+  }
+  
+  const pathSegments = [];
+  let current = 'end';
+  
+  while (previous[current]) {
+    const prev = previous[current];
+    pathSegments.unshift({
+      from: nodes.find(n => n.id === prev.id),
+      to: nodes.find(n => n.id === current),
+      edge: prev.edge
+    });
+    current = prev.id;
+  }
+  
+  // Build the actual path coordinates by following guides
+  const finalPath = [];
+  
+  pathSegments.forEach((segment, idx) => {
+    const guide = segment.edge.guide;
+    const guideLatLngs = guide.getLatLngs();
+    const guideLine = {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: guideLatLngs.map(ll => [ll.lng, ll.lat])
+      }
+    };
+    
+    try {
+      const sliced = turf.lineSlice(segment.from.point, segment.to.point, guideLine);
+      const coords = sliced.geometry.coordinates;
+      
+      // Add to path, avoiding duplicates at junction points
+      if (idx === 0) {
+        coords.forEach(coord => finalPath.push(L.latLng(coord[1], coord[0])));
+      } else {
+        coords.slice(1).forEach(coord => finalPath.push(L.latLng(coord[1], coord[0])));
+      }
+    } catch (e) {
+      // If lineSlice fails, just connect with straight line
+      if (idx === 0) {
+        finalPath.push(L.latLng(segment.from.point.geometry.coordinates[1], segment.from.point.geometry.coordinates[0]));
+      }
+      finalPath.push(L.latLng(segment.to.point.geometry.coordinates[1], segment.to.point.geometry.coordinates[0]));
+    }
+  });
+  
+  return finalPath.length > 0 ? finalPath : null;
+}
+
 function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boundary }) {
   const map = useMap();
   const drawnLayerGroupRef = useRef(L.featureGroup());
   const initRef = useRef(false);
+  const guideManager = useGuideManager(map);
 
   // working state during a draw
   const workingRef   = useRef(null);   // leaflet layer being drawn
@@ -985,7 +1194,20 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
   
   const clearGuides = React.useCallback(() => {
     if (guidesRef.current) {
-      try { map.removeLayer(guidesRef.current); } catch {}
+      try {
+        // Clean up any layers and event listeners
+        const group = guidesRef.current;
+        try {
+          if (group._ensureGuidesDisabled) {
+            try { map.off('pm:globaleditmodetoggled', group._ensureGuidesDisabled); } catch {}
+          }
+        } catch {}
+        group.eachLayer((layer) => {
+          try { if (layer.pm) layer.pm.disable(); } catch {}
+          try { group.removeLayer(layer); } catch {}
+        });
+        try { map.removeLayer(group); } catch {}
+      } catch {}
       guidesRef.current = null;
     }
   }, [map]);
@@ -1018,43 +1240,17 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
     layer.redraw?.();
   }, []);
 
-  const guidesToLeafletLayers = React.useCallback((guidesFc) => {
-    const group = L.featureGroup();
-    guidesFc.features.forEach((f) => {
-      const latlngs = f.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-      const pl = L.polyline(latlngs, {
-        color: "#000",
-        opacity: 0.25,         // keep invisible in production
-        weight: 14,         // large hitbox for snapping
-        interactive: true,
-        pmIgnore: false,
-        snapIgnore: false,
-      });
-      pl._isSnapGuide = true; // flag for cleanup
-      if (pl.pm) {
-        pl.pm.setOptions({ pmIgnore: false, snapIgnore: false });
-        if (L.PM && L.PM.reInitLayer) L.PM.reInitLayer(pl);
-      }
-      group.addLayer(pl);
-    });
-    group.addTo(map);
-    if (L.PM && L.PM.reInitLayer) {
-      group.eachLayer((lyr) => { try { L.PM.reInitLayer(lyr); } catch {} });
-    }
-    return group;
-  }, [map]);
-
+  // Memoized wrapper around guide manager's buildOffsetGuides
   const buildOffsetGuides = React.useCallback((roadFeature, side="left", meters=4) => {
-    const dist = side === "left" ? meters : -meters;
-    const off  = turf.lineOffset(roadFeature, dist, { units: "meters" });
-    const fc   = turf.featureCollection([off]);
-    clearGuides();
-    guidesRef.current = guidesToLeafletLayers(fc);
-    offsetRef.current = off;               // store for snapping all vertices
-    // make sure global snap is on
-    map.pm.setGlobalOptions({ snappable: true, snapDistance: 60, snapSegment: true, snapMiddle: false });
-    map.pm.enableGlobalSnap?.();
-  }, [clearGuides, guidesToLeafletLayers, map]);
+    if (!guideManager || !roadFeature) return;
+    try {
+      const { group, offsetLine } = guideManager.buildOffsetGuides(roadFeature, side, meters);
+      guidesRef.current = group;
+      offsetRef.current = offsetLine;
+    } catch (err) {
+      console.warn("Failed to build offset guides", err);
+    }
+  }, [guideManager]);
 
 
   // choose left/right in **projected pixels** (robust)
@@ -1147,7 +1343,10 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
       snappable: true,
       snapDistance: 30,
       snapSegment: true,
+      snapVertex: false,         // Disable vertex snapping completely
       snapMiddle: false,
+      snapSegmentWeight: 1,      // Maximum weight for segment snapping
+      snapSegmentPrecision: 1,   // Increase precision of segment snapping
     });
 
     
@@ -1157,54 +1356,199 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
 
       workingRef.current = e.workingLayer || null;
       clearGuides();
+      
+      // Set up tracking for guide snapping
+      if (workingRef.current) {
+        workingRef.current._guidePoints = [];
+        workingRef.current._snapGuide = null;
+        
+        // Listen for clicks on the map to track guide points
+        const clickHandler = (clickE) => {
+          const snapPoint = [clickE.latlng.lng, clickE.latlng.lat];
+          let closestGuide = null;
+          let minDist = Infinity;
+          
+          // Find closest guide
+          map.eachLayer((layer) => {
+            if (!layer._isSnapGuide || !layer.getLatLngs) return;
+            
+            const line = {
+              type: 'Feature',
+              geometry: {
+                type: 'LineString',
+                coordinates: layer.getLatLngs().map(ll => [ll.lng, ll.lat])
+              }
+            };
+            const np = turf.nearestPointOnLine(line, turf.point(snapPoint));
+            if (np.properties.dist < minDist) {
+              minDist = np.properties.dist;
+              closestGuide = layer;
+            }
+          });
+          
+          // Accept guides within 20 meters (reasonable snapping distance)
+          if (closestGuide && minDist < 0.02) {
+            const guideLatLngs = closestGuide.getLatLngs();
+            const guideLine = {
+              type: 'Feature',
+              geometry: {
+                type: 'LineString',
+                coordinates: guideLatLngs.map(ll => [ll.lng, ll.lat])
+              }
+            };
+            const snappedPoint = turf.nearestPointOnLine(guideLine, turf.point(snapPoint));
+            
+            workingRef.current._guidePoints.push({
+              point: snappedPoint,
+              guide: closestGuide
+            });
+          }
+        };
+        
+        map.on('click', clickHandler);
+        workingRef.current._clickHandler = clickHandler;
+      }
 
       if (snapSideRef.current === "off") return;
 
       // Enable Geoman snapping to any registered snap layers (our invisible hitboxes)
       if (e.workingLayer?.pm) {
-        e.workingLayer.pm.setOptions({
+        safeSetPmOptions(e.workingLayer, {
           snappable: true,
           snapDistance: 60,
           snapSegment: true,
-          snapMiddle: true
+          snapVertex: false,         // Disable vertex snapping
+          snapMiddle: false,
+          snapSegmentWeight: 1,      // Maximum weight for segment snapping
+          snapSegmentPrecision: 1,   // Increase precision of segment snapping
         });
       }
       map.pm.setGlobalOptions({
         snappable: true,
         snapDistance: 60,
         snapSegment: true,
-        snapMiddle: true
+        snapVertex: false,         // Disable vertex snapping
+        snapMiddle: false,
+        snapSegmentWeight: 1,      // Maximum weight for segment snapping
+        snapSegmentPrecision: 1,   // Increase precision of segment snapping
       });
       map.pm.enableGlobalSnap?.();
     });
 
-    // ---- VERTEX ADDED (force snap to nearest road if not already snapped) ----
+    // ---- VERTEX ADDED (handle guide snapping and path following) ----
     map.on("pm:vertexadded", (e) => {
+      console.log('[pm:vertexadded] EVENT FIRED! snapSide:', snapSideRef.current);
       try {
-        if (snapSideRef.current === "off") return;
+        if (snapSideRef.current === "off") {
+          console.log('[pm:vertexadded] Snap is OFF, skipping');
+          return;
+        }
 
         // active working layer and roads
         const wrk = e.workingLayer || workingRef.current;
-        if (!wrk || !wrk.getLatLngs) return;
+        if (!wrk || !wrk.getLatLngs) {
+          console.log('[pm:vertexadded] No working layer');
+          return;
+        }
+        
+        // Track points for guide following
+        if (!wrk._guidePoints) wrk._guidePoints = [];
+        
+        // Find which guide (if any) we snapped to
+        const snapPoint = [e.latlng.lng, e.latlng.lat];
+        let closestGuide = null;
+        let minDist = Infinity;
+        let guideCount = 0;
+        
+        // Search all layers on the map for snap guides
+        map.eachLayer((layer) => {
+          if (!layer._isSnapGuide || !layer.getLatLngs) return;
+          guideCount++;
+          
+          const line = {
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: layer.getLatLngs().map(ll => [ll.lng, ll.lat])
+            }
+          };
+          const np = turf.nearestPointOnLine(line, turf.point(snapPoint));
+          if (np.properties.dist < minDist && np.properties.dist < 0.000001) {
+            minDist = np.properties.dist;
+            closestGuide = layer;
+          }
+        });
+        
+        console.log('[pm:vertexadded] Found', guideCount, 'guides, closest dist:', minDist, 'closestGuide:', !!closestGuide);
 
-        const roadsFc = (typeof getRoadsFc === "function") ? getRoadsFc() : null;
-        if (!roadsFc || !roadsFc.features?.length) return;
+        // If we snapped to a guide, save the point and guide
+        if (closestGuide) {
+          const guideLatLngs = closestGuide.getLatLngs();
+          const guideLine = {
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: guideLatLngs.map(ll => [ll.lng, ll.lat])
+            }
+          };
+          const snappedPoint = turf.nearestPointOnLine(guideLine, turf.point(snapPoint));
+          let snappedLL = L.latLng(snappedPoint.geometry.coordinates[1], snappedPoint.geometry.coordinates[0]);
+          
+          wrk._guidePoints.push({
+            point: snappedPoint,
+            guide: closestGuide
+          });
+          
+          console.log('[pm:vertexadded] Pushed guide point, total:', wrk._guidePoints.length);
 
-        // click location
-        const clickLngLat = [e.latlng.lng, e.latlng.lat];
+          // If this is our second point on the same guide, generate the path
+          if (wrk._guidePoints.length === 2 && 
+              wrk._guidePoints[0].guide === wrk._guidePoints[1].guide) {
+            
+            console.log('[pm:vertexadded] TWO POINTS on same guide! Generating path...');
+            
+            const guide = wrk._guidePoints[0].guide;
+            const start = wrk._guidePoints[0].point;
+            const end = wrk._guidePoints[1].point;
+            
+            // Get all points along the guide between our two snap points
+            const guidePath = turf.lineSlice(
+              start,
+              end,
+              guideLine
+            );
+            
+            console.log('[pm:vertexadded] Generated path with', guidePath.geometry.coordinates.length, 'points');
+            
+            // Replace the polyline points with the guide path
+            const pathLatLngs = guidePath.geometry.coordinates.map(
+              coord => L.latLng(coord[1], coord[0])
+            );
+            wrk.setLatLngs(pathLatLngs);
+            
+            // Finish the drawing since we have our path
+            map.pm.Draw.Line._finishShape();
+            return;
+          } else if (wrk._guidePoints.length === 2) {
+            console.log('[pm:vertexadded] Two points but different guides');
+          }
+          
+          } else {
+          // When not drawing along a guide, snap to the nearest point
+          const roadsFc = (typeof getRoadsFc === "function") ? getRoadsFc() : null;
+          if (!roadsFc || !roadsFc.features?.length) return;
 
-        // find nearest road + decide side based on click
-        const road = findClosestRoad(roadsFc, clickLngLat);
-        if (!road) return;
+          const clickLngLat = [e.latlng.lng, e.latlng.lat];
+          const road = findClosestRoad(roadsFc, clickLngLat);
+          if (!road) return;
 
-        const side = computeSideForClick(road, clickLngLat);
-        const dist = side === "left" ? 4 : -4;
-        const off = turf.lineOffset(road, dist, { units: "meters" });
-        offsetRef.current = off;
+          const side = computeSideForClick(road, clickLngLat);
+          const dist = side === "left" ? 4 : -4;
+          const off = turf.lineOffset(road, dist, { units: "meters" });
+          offsetRef.current = off;
 
-        // snap the newly created vertex (marker + layer)
-        const np = turf.nearestPointOnLine(off, turf.point(clickLngLat), { units: "meters" });
-        const snappedLL = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+          const np = turf.nearestPointOnLine(off, turf.point(clickLngLat), { units: "meters" });
+          let snappedLL = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
 
         // move the interactive handle when available
         const marker = e.marker;
@@ -1214,11 +1558,16 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
         let latlngs = wrk.getLatLngs();
         const nested = Array.isArray(latlngs) && Array.isArray(latlngs[0]) && latlngs[0].lat === undefined;
         if (nested) latlngs = latlngs[0];
-        if (latlngs.length) {
+
+        if (latlngs.length === 0) {
+          // if no vertices yet, let Geoman place the first on click; we only preview
+          wrk.addLatLng(snappedLL);
+        } else {
           latlngs[latlngs.length - 1] = snappedLL;
           if (nested) wrk.setLatLngs([latlngs]); else wrk.setLatLngs(latlngs);
-          wrk.redraw?.();
         }
+        wrk.redraw?.();
+          }
       } catch {}
     });
 
@@ -1245,8 +1594,8 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
         offsetRef.current = off;
 
         // snap the floating cursor position to the offset line
-        const np = turf.nearestPointOnLine(off, turf.point(clickLngLat), { units: "meters" });
-        const snappedLL = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+  const np = turf.nearestPointOnLine(off, turf.point(clickLngLat), { units: "meters" });
+  let snappedLL = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
 
         // Update the working polyline so the preview point follows the snapped location
         let latlngs = wrk.getLatLngs();
@@ -1266,6 +1615,11 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
 
     // ---- END DRAW ----
     map.on("pm:drawend", () => {
+      // Clean up click handler
+      if (workingRef.current && workingRef.current._clickHandler) {
+        map.off('click', workingRef.current._clickHandler);
+      }
+      
       clearGuides();
       workingRef.current = null;
       roadsRef.current   = null;
@@ -1275,14 +1629,57 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
     // create / edit / remove -> hand off to React state
     map.on("pm:create", (e) => {
       const { layer, shape } = e;
+      console.debug("[pm:create] shape=", shape, "layer?", !!layer);
+      
+      // Check if we should apply guide path following
+      const wrk = workingRef.current;
+      if (shape === "Line" && wrk && wrk._guidePoints && wrk._guidePoints.length === 2) {
+        const startInfo = wrk._guidePoints[0];
+        const endInfo = wrk._guidePoints[1];
+        
+        // If same guide, use simple lineSlice
+        if (startInfo.guide === endInfo.guide) {
+          const guide = startInfo.guide;
+          const guideLatLngs = guide.getLatLngs();
+          const guideLine = {
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: guideLatLngs.map(ll => [ll.lng, ll.lat])
+            }
+          };
+          
+          const guidePath = turf.lineSlice(startInfo.point, endInfo.point, guideLine);
+          const pathLatLngs = guidePath.geometry.coordinates.map(coord => L.latLng(coord[1], coord[0]));
+          layer.setLatLngs(pathLatLngs);
+        } else {
+          // Different guides - find shortest path through guide network
+          const pathLatLngs = findShortestGuidePath(map, startInfo, endInfo);
+          if (pathLatLngs && pathLatLngs.length > 0) {
+            layer.setLatLngs(pathLatLngs);
+          }
+        }
+      }
+      
       const fid = crypto.randomUUID();
       layer._fid = fid;
       const geo = layer.toGeoJSON();
+      
+      // Clear any per-draw guides when creating a study area; persistent
+      // snappable segments are managed by the SnapGuides component which
+      // listens for the finalized boundary event.
+      if (shape === "Polygon" || shape === "Rectangle") {
+        try { clearGuides(); } catch {}
+      }
+
       if (shape === "Line") {
+        console.debug("[pm:create] creating polyline");
         onCreated(geo, layer, "polyline"); layer.remove();
       } else if (shape === "Polygon") {
+        console.debug("[pm:create] creating polygon with coords", geo?.geometry?.coordinates?.[0]?.length);
         onCreated(geo, layer, "polygon"); layer.remove();
       } else if (shape === "Rectangle") {
+        console.debug("[pm:create] creating rectangle");
         onCreated(geo, layer, "rectangle"); layer.remove();
       }
     });
@@ -1548,56 +1945,14 @@ function useIsTouch() {
 
 // --- React-leaflet polyline wrapper that hooks Geoman for per-layer edit/remove ---
 function PolylineWithGeoman({ feature, style, onEdit, onDelete, onClick, children }) {
-  const map = useMap();
   const ref = React.useRef(null);
   const isTouch = useIsTouch();
 
-  useEffect(() => {
-    const layer = ref.current;
-    if (!layer || !map?.pm) return;
-
-    layer._fid = feature.properties?._id;
-
-    // keep edit OFF by default (no vertices shown)
-    try { if (layer.pm) layer.pm.disable(); } catch {}
-
-    // Allow this layer to be used as a snap target
-    if (layer.pm) {
-      try { layer.pm.setOptions({ pmIgnore: false, snapIgnore: false }); } catch {}
-    }
-    if (L.PM && L.PM.reInitLayer) {
-      try { L.PM.reInitLayer(layer); } catch {}
-    }
-
-    const handleEdit = () => {
-      const geo = layer.toGeoJSON();
-      onEdit?.(feature.properties._id, geo);
-    };
-    const handleRemove = () => {
-      onDelete?.(feature.properties._id);
-    };
-    layer.on("pm:edit", handleEdit);
-    layer.on("pm:remove", handleRemove);
-
-    const onGlobalEditToggle = (e) => {
-      try {
-        if (e.enabled) {
-          layer.pm && layer.pm.enable({ allowSelfIntersection: true, snappable: true });
-        } else {
-          layer.pm && layer.pm.disable();
-        }
-      } catch {}
-    };
-
-    map.on("pm:globaleditmodetoggled", onGlobalEditToggle);
-
-    return () => {
-      layer.off("pm:edit", handleEdit);
-      layer.off("pm:remove", handleRemove);
-      map.off("pm:globaleditmodetoggled", onGlobalEditToggle);
-      try { layer.pm && layer.pm.disable(); } catch {}
-    };
-  }, [map, feature, onEdit, onDelete]);
+  // Delegate per-layer Geoman wiring to a reusable hook
+  useGeomanLayer(ref, feature, { onEdit, onRemove: onDelete }, {
+    defaultPmOptions: feature.geometry?.type === "Polygon" ? { pmIgnore: true, snapIgnore: true } : { pmIgnore: false, snapIgnore: false },
+    skipWiring: feature.geometry?.type === "Polygon"
+  });
 
   const coords = feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
 
@@ -1643,15 +1998,60 @@ function PolylineWithGeoman({ feature, style, onEdit, onDelete, onClick, childre
     </div>
   ) : null;
 
+  // Separate handlers for hitbox that reference the visible line
+  const hitboxHandlers = isTouch
+    ? {
+        click: (e) => {
+          e.originalEvent?.preventDefault?.();
+          e.originalEvent?.stopPropagation?.();
+          if (ref.current) {
+            ref.current.openPopup();
+          }
+        },
+      }
+    : {
+        mouseover: () => {
+          if (ref.current) {
+            ref.current.openPopup();
+          }
+        },
+        mouseout: () => {
+          if (ref.current) {
+            ref.current.closePopup();
+          }
+        },
+        click: () => {
+          if (ref.current) {
+            ref.current.closePopup();
+          }
+          onClick?.();
+        },
+      };
+
   return (
-    <Polyline ref={ref} positions={coords} pathOptions={style} eventHandlers={handlers}>
-      <Popup closeButton autoPan>
-        <div style={{ fontSize: 14 }}>
-          {children}
-          {TouchPopupControls}
-        </div>
-      </Popup>
-    </Polyline>
+    <>
+      {/* Invisible wider hitbox for easier clicking */}
+      <Polyline
+        positions={coords}
+        pathOptions={{
+          ...style,
+          weight: 20, // Much wider hitbox
+          opacity: 0, // Completely invisible
+          fillOpacity: 0
+        }}
+        eventHandlers={hitboxHandlers}
+        pmIgnore={true}
+      />
+      {/* Visible line on top */}
+      <Polyline ref={ref} positions={coords} pathOptions={style} eventHandlers={handlers}>
+        <Popup closeButton autoPan>
+          <div style={{ fontSize: 14 }}>
+            {children}
+            {TouchPopupControls}
+          </div>
+        </Popup>
+      </Polyline>
+    </>
   );
 }
 
@@ -1671,6 +2071,7 @@ export default function JenaParkingMap() {
 
   const handleCreated = (geo, layer, layerType) => {
     try {
+      console.debug("[handleCreated]", layerType, geo?.geometry?.type);
       if (layerType === "polygon" || layerType === "rectangle") {
         const coords = geo?.geometry?.coordinates;
         if (Array.isArray(coords) && Array.isArray(coords[0]) && coords[0].length >= 3) {
@@ -1679,9 +2080,9 @@ export default function JenaParkingMap() {
           setBoundary(latlngs);
           const map = layer?._map;
           if (map) {
-  	    map.fitBounds(L.polygon(latlngs).getBounds(), { padding: [20, 20] });
-  	    // tell SnapGuides to fetch for this fresh boundary
-  	    setTimeout(() => { try { map.fire('ps:boundary-finalized'); } catch {} }, 0);
+     	    map.fitBounds(L.polygon(latlngs).getBounds(), { padding: [20, 20] });
+     	    // tell SnapGuides to fetch for this fresh boundary
+     	    setTimeout(() => { try { map.fire('ps:boundary-finalized'); } catch {} }, 0);
 	  }
         } else {
           console.warn("No ring coords found for boundary:", coords);
@@ -1790,44 +2191,55 @@ export default function JenaParkingMap() {
     reader.readAsText(file);
   };
 
+  // Shared control button/select style matching Leaflet's default controls
+  const controlStyle = {
+    padding: "5px 10px",
+    border: "2px solid rgba(0,0,0,0.2)",
+    borderRadius: 4,
+    background: "#fff",
+    color: "#333",
+    fontSize: 13,
+    fontFamily: "inherit",
+    boxShadow: "0 1px 5px rgba(0,0,0,0.65)",
+    cursor: "pointer",
+    minWidth: 30,
+    minHeight: 30,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+
   return (
     <div style={{ position: "relative", width: "100%", height: "100dvh", overflow: "hidden" }}>
-      {/* Language selector (top-left, above map) */}
-      <div style={{ position: "absolute", top: 10, left: 44, zIndex: 999 }}>
+      {/* Control container (top-left) - consistent with Leaflet controls */}
+      <div style={{ position: "absolute", top: 10, left: 54, zIndex: 999, display: "flex", gap: 6, alignItems: "flex-start" }}>
+        {/* Language selector */}
         <select
           value={lang}
           onChange={(e) => setLang(e.target.value)}
-          style={{
-            padding: "6px 8px",
-            border: "1px solid #ddd",
-            borderRadius: 8,
-            background: "rgba(255,255,255,0.95)",
-            fontSize: 13,
-          }}
+          style={controlStyle}
           aria-label="Language"
         >
-          <option value="en">English</option>
-          <option value="de">Deutsch</option>
+          <option value="en">🇬🇧 EN</option>
+          <option value="de">🇩🇪 DE</option>
         </select>
-      </div>
 
-      {/* Snap control (mid-left, below location toggle) */}
-      <div style={{ position:"absolute", top: 10, left: 140, zIndex: 999 }}>
+        {/* Snap control */}
         <select
           value={snapSide}
           onChange={(e) => {
-	    const val = e.target.value;
-	    if (val === "auto" && (!boundary || !Array.isArray(boundary) || boundary.length < 3)) {
-	      alert("Please draw a study area first (use the polygon/rectangle tool).");
-	      return;
-	    }
-	    setSnapSide(val);
-	  }}
-          style={{ padding:"6px 8px", border:"1px solid #ddd", borderRadius:8, background:"rgba(255,255,255,0.95)", fontSize:13 }}
+            const val = e.target.value;
+            if (val === "auto" && (!boundary || !Array.isArray(boundary) || boundary.length < 3)) {
+              alert("Please draw a study area first (use the polygon/rectangle tool).");
+              return;
+            }
+            setSnapSide(val);
+          }}
+          style={controlStyle}
           aria-label="Snap mode"
         >
-          <option value="off">Snap: Off</option>
-          <option value="auto">Snap: Auto</option>
+          <option value="off">📍 Snap: Off</option>
+          <option value="auto">🧲 Snap: Auto</option>
         </select>
       </div>
 
@@ -1965,27 +2377,39 @@ export default function JenaParkingMap() {
       )}
 
       <LegendControl t={t} />
+      
+      <SnapLoadingBar />
+    </div>
+  );
+}
 
-    {/*
-      <div
-        style={{
-          position: "absolute",
-          bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
-          left: "50%",
-          transform: "translateX(-50%)",
-          background: "rgba(255,255,255,0.7)",
-          backdropFilter: "blur(6px)",
-          borderRadius: 9999,
-          padding: "10px 16px",
-          fontSize: 13,
-          fontWeight: 500,
-          boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-          zIndex: 900,
-        }}
-      >
-        {t.drawHint}
+// Loading indicator for snap guide data
+function SnapLoadingBar() {
+  const [state, setState] = React.useState({ loading: false, progress: 0 });
+  
+  React.useEffect(() => {
+    return SnapLoadingState.subscribe(setState);
+  }, []);
+
+  if (!state.loading) return null;
+
+  return (
+    <div style={{
+      position: "fixed",
+      bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
+      left: "50%",
+      transform: "translateX(-50%)",
+      background: "rgba(255,255,255,0.95)",
+      padding: "8px 12px",
+      borderRadius: 8,
+      boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+      backdropFilter: "blur(4px)",
+      zIndex: 1102,
+    }}>
+      <div style={{fontSize: 13, color: "#374151", textAlign: "center"}}>Loading snap guides...</div>
+      <div style={{width: 200, height: 2, background: "#e5e7eb", borderRadius: 1, marginTop: 8, overflow: "hidden"}}>
+        <div style={{height: "100%", background: "#3b82f6", width: `${state.progress * 100}%`, transition: "width 200ms ease-out"}} />
       </div>
-    */}
     </div>
   );
 }
