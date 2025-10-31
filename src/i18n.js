@@ -18,6 +18,12 @@ export const translations = {
     import: "Import",
     exportPDF: "PDF",
     exportWord: "Word",
+    snap: {
+      loading: "Loading snap lines...",
+      delayed: "We are loading the snap lines as quickly as possible",
+      retrying: "Server busy — retrying...",
+      timedOut: "Request timed out, retrying..."
+    },
     clearAll: "🗑️ Clear all data",
     clearStudy: "Clear study area",
     autosaveInfo: "Data is autosaved to your browser. Export to share or back up.",
@@ -60,6 +66,12 @@ export const translations = {
     import: "Importieren",
     exportPDF: "PDF",
     exportWord: "Word",
+    snap: {
+      loading: "Snap-Linien werden geladen...",
+      delayed: "Wir laden die Snap-Linien so schnell wie möglich",
+      retrying: "Server beschäftigt — erneuter Versuch...",
+      timedOut: "Anfrage abgelaufen, erneuter Versuch..."
+    },
     clearAll: "🗑️ Alle Daten löschen",
     clearStudy: "Untersuchungsgebiet löschen",
     autosaveInfo:

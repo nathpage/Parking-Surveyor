@@ -66,19 +66,24 @@ button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
-/* Override any dark mode preferences - force light mode for consistency */
+/* Don't blanket-override all buttons in dark mode; instead preserve our app's inline variants.
+   Some platform/UAs will apply forced dark styles, which can override inline styles. To ensure
+   the Btn/LabelBtn variants (applied inline) keep their colors, we add a more specific rule
+   that prevents forced color inversion on elements inside our app. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  /* Limit forced-light adjustments to map controls and popups only (these rely on CSS overrides)
+     and avoid touching general <button> so our inline-styled buttons keep their color. */
+  .leaflet-control,
+  .leaflet-popup,
+  .leaflet-pm-toolbar,
+  .leaflet-pm-action {
+    background-color: #fff !important;
+    color: #333 !important;
+    border-color: rgba(0,0,0,0.2) !important;
+  }
+
+  /* Prevent user agent darkening/inverting of images/icons inside our app container */
+  #root, #root * {
     color-scheme: light !important;
-    color: #213547 !important;
-    background-color: #ffffff !important;
-  }
-  body {
-    color: #213547 !important;
-    background-color: #ffffff !important;
-  }
-  button {
-    background-color: #f9f9f9 !important;
-    color: #213547 !important;
   }
 }

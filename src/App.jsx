@@ -245,6 +245,7 @@ function Btn({ variant = "dark", full, style, ...props }) {
   return (
     <button
       {...props}
+      data-ps-btn
       style={mergeStyles(
         BTN_BASE,
         BTN_VARIANTS[variant],
@@ -260,6 +261,7 @@ function LabelBtn({ variant = "muted", htmlFor, full, style, children }) {
   return (
     <label
       htmlFor={htmlFor}
+      data-ps-btn
       style={mergeStyles(
         BTN_BASE,
         BTN_VARIANTS[variant],
@@ -305,24 +307,34 @@ function Controls({
 
   const fmtMeters = (n) => (n >= 1000 ? `${(n / 1000).toFixed(2)} km` : `${Math.round(n)} m`);
 
+  // Responsive: center panel on narrow/mobile screens
+  const [isNarrow, setIsNarrow] = React.useState(typeof window !== 'undefined' ? window.innerWidth <= 520 : false);
+  React.useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth <= 520);
+    try { window.addEventListener('resize', onResize); } catch {}
+    return () => { try { window.removeEventListener('resize', onResize); } catch {} };
+  }, []);
+
+  const containerStyle = {
+    position: isNarrow ? 'fixed' : 'absolute',
+    top: isNarrow ? 80 : 16,
+    right: isNarrow ? 'auto' : 16,
+    left: isNarrow ? '50%' : 'auto',
+    transform: isNarrow ? 'translateX(-50%)' : 'none',
+    width: isNarrow ? 'min(96vw, 360px)' : 'min(92vw, 340px)',
+    maxHeight: '82vh',
+    overflowY: 'auto',
+    background: 'rgba(255,255,255,0.95)',
+    borderRadius: 16,
+    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+    padding: 16,
+    fontSize: 14,
+    zIndex: 1000,
+    WebkitOverflowScrolling: 'touch',
+  };
+
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 16,
-        right: 16,
-        width: "min(92vw, 340px)",
-        maxHeight: "82vh",
-        overflowY: "auto",
-        background: "rgba(255,255,255,0.95)",
-        borderRadius: 16,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-        padding: 16,
-        fontSize: 14,
-        zIndex: 1000,
-        WebkitOverflowScrolling: "touch",
-      }}
-    >
+    <div style={containerStyle}>
       <div style={{ fontWeight: 600, fontSize: 18, marginBottom: 6 }}>{t.appTitle}</div>
       <div style={{ color: "#6b7280", fontSize: 12, marginBottom: 10 }}>{t.subtitle}</div>
 
@@ -479,7 +491,7 @@ function useAutosave(features, setFeatures, boundary, setBoundary) {
 }
 
 // Function for Location
-function LocateControl() {
+function LocateControl({ lang, setLang, snapSide, setSnapSide, boundary }) {
   const map = useMap();
   const [pos, setPos] = React.useState(null);
   const [acc, setAcc] = React.useState(null);
@@ -540,7 +552,7 @@ function LocateControl() {
         </>
       )}
 
-      <div className="leaflet-top leaflet-left" style={{ left: 0, top: 282 }}>
+      <div className="leaflet-top leaflet-left" style={{ left: 0, top: 285, zIndex: 995 }}>
         <div className="leaflet-control leaflet-bar">
           {!watching ? (
             <a
@@ -550,7 +562,8 @@ function LocateControl() {
                 e.preventDefault();
                 startLocate();
               }}
-              style={{ display: "block", width: 30, height: 30, lineHeight: "30px", textAlign: "center" }}
+              className="ps-ctl"
+              style={{ WebkitTapHighlightColor: "transparent" }}
             >
               📍
             </a>
@@ -562,11 +575,48 @@ function LocateControl() {
                 e.preventDefault();
                 stopLocate();
               }}
-              style={{ display: "block", width: 30, height: 30, lineHeight: "30px", textAlign: "center", zIndex: 999 }}
+              className="ps-ctl"
+              style={{ WebkitTapHighlightColor: "transparent" }}
             >
               ✖️
             </a>
           )}
+
+          {/* Language toggle */}
+          <a
+            href="#"
+            title={lang === "en" ? "Switch to Deutsch" : "Switch to English"}
+            onClick={(e) => {
+              e.preventDefault();
+              try { setLang((l) => (l === "en" ? "de" : "en")); } catch {}
+            }}
+            className="ps-ctl"
+            style={{ WebkitTapHighlightColor: "transparent" }}
+          >
+            {lang === "en" ? "EN" : "DE"}
+          </a>
+
+          {/* Snap toggle */}
+          <a
+            href="#"
+            title={snapSide === "auto" ? "Disable snap" : "Enable snap"}
+            onClick={(e) => {
+              e.preventDefault();
+              if (snapSide !== "auto") {
+                if (!boundary || !Array.isArray(boundary) || boundary.length < 3) {
+                  alert("Please draw a study area first (use the polygon/rectangle tool).");
+                  return;
+                }
+                try { setSnapSide("auto"); } catch {}
+              } else {
+                try { setSnapSide("off"); } catch {}
+              }
+            }}
+            className={`ps-ctl ${snapSide === "auto" ? "ps-snap-active" : ""}`}
+            style={{ WebkitTapHighlightColor: "transparent" }}
+          >
+            {snapSide === "auto" ? "🧲" : "S"}
+          </a>
         </div>
       </div>
     </>
@@ -690,7 +740,7 @@ function PmGuideGuard() {
 // Persistent, visible snap guides for "Snap: Auto"
 // - Fetches OSM roads for the current (padded) bounds when active
 // - Draws visible offset guides for both sides so users can see where snapping will happen
-function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary }) {
+function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary, lang = 'en' }) {
   const map = useMap();
   // guide manager centralizes creation / removal and listener cleanup
   const guideManager = useGuideManager(map);
@@ -711,14 +761,28 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
   const [statusMessage, setStatusMessage] = React.useState('');
   const [errorMessage, setErrorMessage] = React.useState('');
   const progressTimerRef = useRef(null);
+  const delayedMsgTimerRef = useRef(null);
+  const statusMessageRef = useRef('');
 
-  const beginLoading = React.useCallback((message = 'Loading snap guides...') => {
+  // Keep ref in sync for checks inside delayed timer
+  React.useEffect(() => { statusMessageRef.current = statusMessage; }, [statusMessage]);
+
+  const beginLoading = React.useCallback((message = null) => {
+    const msg = message || (translations[lang]?.snap?.loading || 'Loading snap lines...');
     try { if (progressTimerRef.current) { clearInterval(progressTimerRef.current); } } catch {}
     setLoading(true);
     setProgress(0.1);
     setStatusMessage(message);
     setErrorMessage('');
     SnapLoadingState.setState({ loading: true, progress: 0.1 });
+    // Show a helpful message if loading takes longer than 1.5s
+    try { if (delayedMsgTimerRef.current) clearTimeout(delayedMsgTimerRef.current); } catch {}
+    delayedMsgTimerRef.current = setTimeout(() => {
+      // Only set the delayed friendly message if no other status (like retry) has been set
+      if (!statusMessageRef.current || statusMessageRef.current === msg) {
+        setStatusMessage(translations[lang]?.snap?.delayed || 'We are loading the snap lines as quickly as possible');
+      }
+    }, 1500);
     progressTimerRef.current = setInterval(() => {
       setProgress((p) => {
         const newP = Math.min(0.85, p + 0.03);
@@ -735,6 +799,7 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
         progressTimerRef.current = null;
       }
     } catch {}
+    try { if (delayedMsgTimerRef.current) { clearTimeout(delayedMsgTimerRef.current); delayedMsgTimerRef.current = null; } } catch {}
     setProgress(1);
     SnapLoadingState.setState({ loading: true, progress: 1 });
     setTimeout(() => {
@@ -855,12 +920,19 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
     if (fetchingRef.current) return;
     fetchingRef.current = true;
     try {
-      beginLoading('Loading street data...');
-      const fc = await fetchOSMRoadsForBBox(bboxArr, (msg) => {
-        setStatusMessage(msg);
+      beginLoading();
+      const fc = await fetchOSMRoadsForBBox(bboxArr, (rawMsg) => {
+        // Map known raw messages to translated status messages where possible
+        let m = rawMsg;
+        if (/retrying/i.test(rawMsg) && translations[lang]?.snap?.retrying) {
+          m = translations[lang].snap.retrying;
+        } else if (/timed out/i.test(rawMsg) && translations[lang]?.snap?.timedOut) {
+          m = translations[lang].snap.timedOut;
+        }
+        setStatusMessage(m);
       });
-      setProgress(0.9);
-      setStatusMessage('Building guides...');
+  setProgress(0.9);
+  setStatusMessage(translations[lang]?.snap?.loading || 'Building guides...');
       roadsFcRef.current = fc;
       lastBBoxRef.current = cur;
       rebuildGuides();
@@ -875,6 +947,7 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
           progressTimerRef.current = null;
         }
       } catch {}
+      try { if (delayedMsgTimerRef.current) { clearTimeout(delayedMsgTimerRef.current); delayedMsgTimerRef.current = null; } } catch {}
       // Show error state
       setLoading(false);
       setProgress(0);
@@ -932,7 +1005,10 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
           backdropFilter: "blur(4px)",
           zIndex: 1102,
         }}>
-          <div style={{fontSize: 13, color: "#374151", textAlign: "center"}}>{statusMessage}</div>
+          <div style={{display: "flex", gap: 8, alignItems: "center", justifyContent: "center"}}>
+            <div style={{width: 14, height: 14, borderRadius: 7, border: "2px solid #e5e7eb", borderTopColor: "#2563eb", animation: "ps-spin 900ms linear infinite"}} />
+            <div style={{fontSize: 13, color: "#374151", textAlign: "center"}}>{statusMessage || (translations[lang]?.snap?.loading || 'Loading snap lines...')}</div>
+          </div>
           <div style={{width: 200, height: 2, background: "#e5e7eb", borderRadius: 1, marginTop: 8, overflow: "hidden"}}>
             <div style={{height: "100%", background: "#3b82f6", width: `${progress * 100}%`, transition: "width 200ms ease-out"}} />
           </div>
@@ -2211,37 +2287,7 @@ export default function JenaParkingMap() {
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100dvh", overflow: "hidden" }}>
-      {/* Control container (top-left) - consistent with Leaflet controls */}
-      <div style={{ position: "absolute", top: 10, left: 54, zIndex: 999, display: "flex", gap: 6, alignItems: "flex-start" }}>
-        {/* Language selector */}
-        <select
-          value={lang}
-          onChange={(e) => setLang(e.target.value)}
-          style={controlStyle}
-          aria-label="Language"
-        >
-          <option value="en">🇬🇧 EN</option>
-          <option value="de">🇩🇪 DE</option>
-        </select>
-
-        {/* Snap control */}
-        <select
-          value={snapSide}
-          onChange={(e) => {
-            const val = e.target.value;
-            if (val === "auto" && (!boundary || !Array.isArray(boundary) || boundary.length < 3)) {
-              alert("Please draw a study area first (use the polygon/rectangle tool).");
-              return;
-            }
-            setSnapSide(val);
-          }}
-          style={controlStyle}
-          aria-label="Snap mode"
-        >
-          <option value="off">📍 Snap: Off</option>
-          <option value="auto">🧲 Snap: Auto</option>
-        </select>
-      </div>
+      {/* Language + Snap controls were moved into LocateControl to unify container and styling */}
 
       <PanelToggle open={panelOpen} setOpen={setPanelOpen} label={panelOpen ? t.ui.hidePanel : t.ui.showPanel} />
 
@@ -2348,6 +2394,7 @@ export default function JenaParkingMap() {
         {snapActive && (
           <SnapGuides
             active={true}
+            lang={lang}
             boundary={boundary}
             setExternalRoadsGetter={(getterFactory) => { JenaParkingMap._getRoadsFc = getterFactory; }}
             offsetMeters={4}
@@ -2362,7 +2409,7 @@ export default function JenaParkingMap() {
           getRoadsFc={() => (typeof JenaParkingMap._getRoadsFc === "function" ? JenaParkingMap._getRoadsFc() : null)}
           boundary={boundary}
         />
-        <LocateControl />
+  <LocateControl lang={lang} setLang={setLang} snapSide={snapSide} setSnapSide={setSnapSide} boundary={boundary} />
       </MapContainer>
 
    
