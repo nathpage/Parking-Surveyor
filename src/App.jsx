@@ -1504,7 +1504,6 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
           if (wrk._guidePoints.length === 2 && 
               wrk._guidePoints[0].guide === wrk._guidePoints[1].guide) {
             
-            console.log('[pm:vertexadded] TWO POINTS on same guide! Generating path...');
             
             const guide = wrk._guidePoints[0].guide;
             const start = wrk._guidePoints[0].point;
