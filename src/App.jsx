@@ -1211,24 +1211,6 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
 
   // --- helpers ---
 
-  const snapAllVertices = React.useCallback((layer) => {
-    const off = offsetRef.current;
-    if (!off || !layer?.getLatLngs) return;
-
-    let latlngs = layer.getLatLngs();
-    const nested = Array.isArray(latlngs) && Array.isArray(latlngs[0]) && latlngs[0].lat === undefined;
-    if (nested) latlngs = latlngs[0];
-
-    for (let i = 0; i < latlngs.length; i++) {
-      const ll = latlngs[i];
-      const np = turf.nearestPointOnLine(off, turf.point([ll.lng, ll.lat]), { units: "meters" });
-      const snapped = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
-      latlngs[i] = snapped;
-    }
-    if (nested) layer.setLatLngs([latlngs]); else layer.setLatLngs(latlngs);
-    layer.redraw?.();
-  }, []);
-
   // Memoized wrapper around guide manager's buildOffsetGuides
   const buildOffsetGuides = React.useCallback((roadFeature, side="left", meters=4) => {
     if (!guideManager || !roadFeature) return;
