@@ -10,7 +10,7 @@ import { exportPdf, exportDocx } from "./exports/docs";
 import { translations } from "./i18n";
 import * as turf from "@turf/turf";
 import "leaflet-geometryutil"; // adds L.GeometryUtil.* helpers
-import { safeReInitLayer, createGuidesFromFeatureCollection, safeDisablePm, safeSetPmOptions } from "./utils/geomanHelpers";
+import { safeReInitLayer, safeDisablePm, safeSetPmOptions } from "./utils/geomanHelpers";
 import useGeomanLayer from "./hooks/useGeomanLayer";
 import useGuideManager from "./hooks/useGuideManager";
 import useGlobalEditGuard from "./hooks/useGlobalEditGuard";
