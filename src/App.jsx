@@ -1448,7 +1448,6 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
         // active working layer and roads
         const wrk = e.workingLayer || workingRef.current;
         if (!wrk || !wrk.getLatLngs) {
-          console.log('[pm:vertexadded] No working layer');
           return;
         }
         
