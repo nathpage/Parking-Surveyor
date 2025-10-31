@@ -688,7 +688,6 @@ function SnapGuides({ active, setExternalRoadsGetter, offsetMeters = 4, boundary
   const { 
     createFromFc, 
     removeAll: removeManagedGuides, 
-    groupRef: managedGroupRef,
     buildOffsetGuides: buildManagedGuides 
   } = guideManager;
   const roadsFcRef = useRef(null);
