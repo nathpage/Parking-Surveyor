@@ -1437,7 +1437,6 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
 
     // ---- VERTEX ADDED (handle guide snapping and path following) ----
     map.on("pm:vertexadded", (e) => {
-      console.log('[pm:vertexadded] EVENT FIRED! snapSide:', snapSideRef.current);
       try {
         if (snapSideRef.current === "off") {
           console.log('[pm:vertexadded] Snap is OFF, skipping');
