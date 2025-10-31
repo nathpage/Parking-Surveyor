@@ -1439,7 +1439,9 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
     map.on("pm:vertexadded", (e) => {
       try {
         if (snapSideRef.current === "off") {
-          console.log('[pm:vertexadded] Snap is OFF, skipping');
+          if (process.env.NODE_ENV !== 'production') {
+            console.log('[pm:vertexadded] Snap is OFF, skipping');
+          }
           return;
         }
 
