@@ -1527,7 +1527,7 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
             map.pm.Draw.Line._finishShape();
             return;
           } else if (wrk._guidePoints.length === 2) {
-            console.log('[pm:vertexadded] Two points but different guides');
+            // Two points but different guides
           }
           
           } else {
