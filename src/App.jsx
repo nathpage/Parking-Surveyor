@@ -1476,7 +1476,6 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
               wrk._guidePoints[0].guide === wrk._guidePoints[1].guide) {
             
             
-            const guide = wrk._guidePoints[0].guide;
             const start = wrk._guidePoints[0].point;
             const end = wrk._guidePoints[1].point;
             
