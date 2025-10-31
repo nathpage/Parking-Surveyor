@@ -1516,7 +1516,6 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
               guideLine
             );
             
-            console.log('[pm:vertexadded] Generated path with', guidePath.geometry.coordinates.length, 'points');
             
             // Replace the polyline points with the guide path
             const pathLatLngs = guidePath.geometry.coordinates.map(
