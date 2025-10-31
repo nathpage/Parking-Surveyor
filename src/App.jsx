@@ -1479,7 +1479,6 @@ function GeomanDraw({ onCreated, onEdited, onDeleted, snapSide, getRoadsFc, boun
           }
         });
         
-        console.log('[pm:vertexadded] Found', guideCount, 'guides, closest dist:', minDist, 'closestGuide:', !!closestGuide);
 
         // If we snapped to a guide, save the point and guide
         if (closestGuide) {
