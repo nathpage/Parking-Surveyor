@@ -13,7 +13,6 @@ import "leaflet-geometryutil"; // adds L.GeometryUtil.* helpers
 import { safeReInitLayer, safeDisablePm, safeSetPmOptions } from "./utils/geomanHelpers";
 import useGeomanLayer from "./hooks/useGeomanLayer";
 import useGuideManager from "./hooks/useGuideManager";
-import useGlobalEditGuard from "./hooks/useGlobalEditGuard";
 
 // Shared Overpass helper (fetch OSM roads for bbox)
 async function fetchOSMRoadsForBBox(bboxArr, onProgress) {
