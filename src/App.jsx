@@ -614,14 +614,6 @@ function EditableBoundary({ boundary, setBoundary }) {
       try { safeReInitLayer(layer); } catch {}
 
             // helper: read current polygon and push into React state
-      const commitBoundary = () => {
-        try {
-          const rings = layer.getLatLngs();
-          const ring = (Array.isArray(rings) && Array.isArray(rings[0])) ? rings[0] : rings;
-          const next = ring.map(ll => [ll.lat, ll.lng]);
-          setBoundary(next);
-        } catch {}
-      };
 
       // We intentionally do NOT wire Geoman edit listeners for the study
       // boundary so that it remains non-editable after creation. The
